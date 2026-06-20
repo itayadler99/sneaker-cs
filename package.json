@@ -1,0 +1,15 @@
+{
+  "name": "sneaker-cs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Order-aware customer-service draft bot for Sneaker Station + Studio (email + FB/IG).",
+  "main": "src/worker.js",
+  "scripts": {
+    "start": "node src/worker.js",
+    "dry": "node test/dry-run.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "googleapis": "^144.0.0"
+  }
+}
