@@ -20,6 +20,29 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 echo $$ > "$LOCKDIR/pid"
 trap 'rm -rf "$LOCKDIR"' EXIT
-MAX_PER_RUN=6 /usr/bin/python3 route-b/worker.py >> route-b/run.log 2>&1
+
+# Telegram notifier (visible autonomy: Itay must hear about every new draft).
+TG_TOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' .env | cut -d= -f2-)
+TG_CHAT=$(grep -E '^TELEGRAM_CHAT_ID=' .env | cut -d= -f2-)
+tg() {
+  [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ] || return 0
+  curl -s -m 15 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text=$1" >/dev/null 2>&1
+}
+
+WORKER_OUT=$(MAX_PER_RUN=6 /usr/bin/python3 route-b/worker.py 2>&1)
+echo "$WORKER_OUT" >> route-b/run.log
 # QA manager: audit every fresh draft against live Shopify, flag mistakes, alert owner.
-/usr/bin/python3 route-b/qa.py >> route-b/run.log 2>&1
+QA_OUT=$(/usr/bin/python3 route-b/qa.py 2>&1)
+echo "$QA_OUT" >> route-b/run.log
+
+# Notify Itay when there's something for him to act on.
+DRAFTED=$(echo "$WORKER_OUT" | grep -oE 'drafted=[0-9]+' | tail -1 | cut -d= -f2)
+ESCALATED=$(echo "$WORKER_OUT" | grep -oE 'escalated=[0-9]+' | tail -1 | cut -d= -f2)
+QA_FAILS=$(echo "$QA_OUT" | grep -oE 'fail=[0-9]+' | tail -1 | cut -d= -f2)
+if [ "${DRAFTED:-0}" -gt 0 ] || [ "${ESCALATED:-0}" -gt 0 ]; then
+  tg "🤖 בוט שירות SneakerStation: ${DRAFTED:-0} טיוטות חדשות, ${ESCALATED:-0} להסלמה. בדוק ב-Gmail של החנות."
+fi
+if [ "${QA_FAILS:-0}" -gt 0 ]; then
+  tg "⚠️ QA תפס ${QA_FAILS} טיוטות בעייתיות (סומנו QA-FAIL, לא יישלחו). בדוק."
+fi
