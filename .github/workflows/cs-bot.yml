@@ -1,0 +1,46 @@
+name: sneaker-cs cloud bot
+
+# 24/7 customer-service auto-responder. Runs in GitHub's cloud — no Mac needed.
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 min (GitHub min granularity, often ~best-effort)
+  workflow_dispatch: {}        # manual run button
+
+concurrency:
+  group: cs-bot
+  cancel-in-progress: false
+
+jobs:
+  drain-mailbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+      STORE_GMAIL_USER: ${{ secrets.STORE_GMAIL_USER }}
+      STORE_GMAIL_APP_PASSWORD: ${{ secrets.STORE_GMAIL_APP_PASSWORD }}
+      STUDIO_GMAIL_USER: ${{ secrets.STUDIO_GMAIL_USER }}
+      STUDIO_GMAIL_APP_PASSWORD: ${{ secrets.STUDIO_GMAIL_APP_PASSWORD }}
+      STATION_SHOP_DOMAIN: ${{ secrets.STATION_SHOP_DOMAIN }}
+      STATION_ADMIN_TOKEN: ${{ secrets.STATION_ADMIN_TOKEN }}
+      STUDIO_SHOP_DOMAIN: ${{ secrets.STUDIO_SHOP_DOMAIN }}
+      STUDIO_ADMIN_TOKEN: ${{ secrets.STUDIO_ADMIN_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      MAX_PER_RUN: "6"
+      MIN_CONF: "0.80"
+      ENABLE_SEND: ${{ vars.ENABLE_SEND || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Station mailbox
+        env:
+          STORE: station
+        run: python route-b/cloud_worker.py
+      - name: Studio mailbox
+        if: ${{ env.STUDIO_GMAIL_APP_PASSWORD != '' }}
+        env:
+          STORE: studio
+        run: python route-b/cloud_worker.py
