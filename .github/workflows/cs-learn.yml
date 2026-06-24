@@ -1,0 +1,54 @@
+name: sneaker-cs self-learning
+
+# Daily: learn from REAL human-sent replies, refresh the few-shot bank, commit it
+# back to the repo so the bot imitates how a human answered. Cloud-only, no Mac.
+on:
+  schedule:
+    - cron: "30 3 * * *"   # 03:30 UTC daily
+  workflow_dispatch: {}
+
+concurrency:
+  group: cs-learn
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+      STORE_GMAIL_USER: ${{ secrets.STORE_GMAIL_USER }}
+      STORE_GMAIL_APP_PASSWORD: ${{ secrets.STORE_GMAIL_APP_PASSWORD }}
+      STUDIO_GMAIL_USER: ${{ secrets.STUDIO_GMAIL_USER }}
+      STUDIO_GMAIL_APP_PASSWORD: ${{ secrets.STUDIO_GMAIL_APP_PASSWORD }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Learn station
+        env:
+          STORE: station
+        run: python route-b/learn.py
+      - name: Learn studio
+        if: ${{ env.STUDIO_GMAIL_APP_PASSWORD != '' }}
+        env:
+          STORE: studio
+        run: python route-b/learn.py
+      - name: Commit refreshed few-shot bank
+        run: |
+          git config user.name "sneaker-cs-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add kb/learned-*.md 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no learning changes"
+          else
+            git commit -m "chore(learn): refresh few-shot bank from real replies"
+            git push
+          fi

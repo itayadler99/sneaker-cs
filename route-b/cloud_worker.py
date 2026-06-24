@@ -50,6 +50,13 @@ SENT_BOX = "[Gmail]/Sent Mail"
 DONE_LABEL = "cs-bot-seen"   # Gmail label = durable state (the cloud disk is ephemeral)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KB = open(os.path.join(ROOT, "kb", "knowledge-base.md"), encoding="utf-8").read()
+# few-shot bank distilled from REAL human-sent replies (learn.py). Makes the bot
+# imitate how a real human answered before. Optional — empty until learn.py runs.
+_LEARNED_PATH = os.path.join(ROOT, "kb", f"learned-{STORE}.md")
+try:
+    LEARNED = open(_LEARNED_PATH, encoding="utf-8").read().strip()
+except Exception:
+    LEARNED = ""
 
 IGNORE_SENDER = re.compile(
     r"@(t\.shopifyemail\.com|shopify\.com|email\.shopify\.com|notifications\.tiktok\.com|"
@@ -218,6 +225,9 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 === ידע ===
 {kb}
 
+=== דוגמאות מתשובות אמיתיות שנשלחו על ידי נציג אנושי (חקי את הטון, הסגנון והעובדות האלה) ===
+{learned}
+
 === פרטי הפנייה ===
 שולח: {sender_name} <{sender_email}>
 נושא: {subject}
@@ -230,6 +240,7 @@ def ask_brain(sender_name, sender_email, subject, message):
     orders_block = format_orders(find_orders(sender_email, message))
     prompt = PROMPT_TMPL.format(
         store=STORE_NAME, kb=KB, orders=orders_block,
+        learned=LEARNED or "(עדיין אין דוגמאות נלמדות.)",
         sender_name=sender_name, sender_email=sender_email,
         subject=subject, message=message,
     )
