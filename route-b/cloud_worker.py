@@ -362,6 +362,9 @@ def main():
                 M.store(num, "+FLAGS", "\\Seen")
                 sent += 1
                 log(f"SENT  {sender_email} | {subject[:40]} | conf={conf}")
+                tg(f"🤖 {STORE_NAME} — נשלחה תשובה אוטומטית ללקוח\n"
+                   f"אל: {sender_name} <{sender_email}>\n"
+                   f"נושא: {subject}\n\n{res['reply']}")
             except Exception as e:
                 escalated += 1
                 log(f"SEND-FAIL {sender_email} | {e!r}")
@@ -383,12 +386,13 @@ def main():
             escalated += 1
             why = "רגיש" if sensitive else res.get("reason", f"conf={conf}")
             log(f"ESCAL {sender_email} | {subject[:40]} | {why}")
+            tg(f"📥 {STORE_NAME} — פנייה הושארה לך (לא נשלח, טיוטה ב-Gmail)\n"
+               f"מ: {sender_name} <{sender_email}>\n"
+               f"נושא: {subject}\n"
+               f"סיבה: {why}"
+               + (f"\n\nטיוטה מוצעת:\n{res['reply']}" if res.get("reply") else ""))
         mark_done(M, num)   # durable: never re-bill the brain on this message again
     M.logout()
-    if sent:
-        tg(f"🤖 {STORE_NAME}: נשלחו {sent} תשובות ללקוחות אוטומטית.")
-    if escalated:
-        tg(f"📥 {STORE_NAME}: {escalated} פניות הושארו לך (טיוטה ב-Gmail, לא נשלחו).")
     log(f"DONE sent={sent} escalated={escalated} skipped={skipped}")
 
 if __name__ == "__main__":
