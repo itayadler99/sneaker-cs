@@ -3,7 +3,10 @@ name: sneaker-cs cloud bot
 # 24/7 customer-service auto-responder. Runs in GitHub's cloud — no Mac needed.
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 min (GitHub min granularity, often ~best-effort)
+    # staggered odd-minute offsets reduce GitHub's top-of-hour scheduler contention,
+    # which tends to delay "*/15" runs by hours on private repos.
+    - cron: "3,18,33,48 * * * *"
+    - cron: "9,24,39,54 * * * *"
   workflow_dispatch: {}        # manual run button
 
 concurrency:
