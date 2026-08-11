@@ -32,8 +32,9 @@ fi
 echo $$ > "$LOCKDIR/pid"
 trap 'rm -rf "$LOCKDIR"' EXIT
 
-# Station mailbox
-STORE=station MAX_PER_RUN=6 /usr/bin/python3 route-b/cloud_worker.py >> route-b/run.log 2>&1
+# Station mailbox — DRAFT-ONLY (ENABLE_SEND=0) until the old Apps Script bot
+# living inside the store's Google account is disabled, to avoid double replies.
+STORE=station ENABLE_SEND=0 MAX_PER_RUN=6 /usr/bin/python3 route-b/cloud_worker.py >> route-b/run.log 2>&1
 # Studio mailbox (only if its app password is configured)
 if [ -n "$STUDIO_GMAIL_APP_PASSWORD" ]; then
   STORE=studio MAX_PER_RUN=6 /usr/bin/python3 route-b/cloud_worker.py >> route-b/run.log 2>&1

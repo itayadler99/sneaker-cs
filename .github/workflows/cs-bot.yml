@@ -1,10 +1,10 @@
 name: sneaker-cs cloud bot
 
-# 24/7 customer-service auto-responder. Runs in GitHub's cloud â no Mac needed.
+# 24/7 customer-service auto-responder. Runs in GitHub's cloud - no Mac needed.
 on:
   schedule:
-    # once per hour (reduced from every ~7 min to cut Actions cost, July 2026).
-    - cron: "7 * * * *"
+    # every 15 minutes, odd-minute offset to dodge top-of-hour scheduler contention.
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch: {}        # manual run button
 
 concurrency:
@@ -39,6 +39,10 @@ jobs:
       - name: Station mailbox
         env:
           STORE: station
+          # DRAFT-ONLY until the legacy Apps Script bot inside the store's
+          # Google account is disabled (it auto-replies on Station; two bots
+          # answering the same customer is worse than none).
+          ENABLE_SEND: "0"
         run: python route-b/cloud_worker.py
       - name: Studio mailbox
         if: ${{ env.STUDIO_GMAIL_APP_PASSWORD != '' }}

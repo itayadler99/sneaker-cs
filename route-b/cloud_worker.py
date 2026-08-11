@@ -12,7 +12,12 @@
 # is escalated to the owner via Telegram and left UNREAD for manual handling.
 
 import imaplib, smtplib, email, json, os, re, sys, time, hashlib
+import socket
 import urllib.request, urllib.parse
+
+# Hard global socket timeout: without it a single stalled IMAP fetch hangs the
+# process forever (July 20 2026: worker hung 21 days, blocking launchd + watchdog).
+socket.setdefaulttimeout(60)
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime, formatdate, make_msgid
@@ -354,7 +359,7 @@ def main():
                                 res["reply"], msgid, dh(msg.get("References", "")))
                 # archive a copy into Sent so it threads in Gmail
                 try:
-                    M.append(SENT_BOX, "(\\Seen)",
+                    M.append(f'"{SENT_BOX}"', "(\\Seen)",
                              imaplib.Time2Internaldate(time.time()), em.as_bytes())
                 except Exception as e:
                     log("sent-append warn", repr(e))
