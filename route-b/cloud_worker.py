@@ -86,8 +86,9 @@ def tg(msg):
         data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": msg}).encode()
         urllib.request.urlopen(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data, timeout=15)
-    except Exception:
-        pass
+    except Exception as e:
+        # never fail the run over Telegram, but never fail silently either
+        log("TELEGRAM-FAIL", repr(e))
 
 def msg_labels(imap, num):
     """Gmail labels on a message (used as durable processed-state in the cloud)."""
