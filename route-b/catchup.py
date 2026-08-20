@@ -202,6 +202,11 @@ def find_unanswered(user, pw):
         addr = addr.lower()
         if not addr or addr == me or IGNORE_SENDER.search(addr):
             continue
+        # Bulk mail always carries an unsubscribe header. Real customers writing
+        # from their own mailbox never do, so this is a cleaner filter than
+        # chasing sender domains, and it keeps newsletters out of Itay's list.
+        if msg.get("List-Unsubscribe") or msg.get("Precedence") in ("bulk", "list"):
+            continue
         subject = dh(msg.get("Subject", ""))
         if re.search(r"order\s+#?\d+\s+placed|\[Sneaker", subject, re.I):
             continue
@@ -259,13 +264,23 @@ def run_store(store_name, user, pw):
         return result
 
     log(f"{store_name}: {len(todo)} unanswered in last {DAYS}d")
+    classified = []
     for item in todo:
+        kind, reason = classify(item["subject"], item["body"])
+        classified.append((kind, reason, item))
+
+    # If someone has any thread that needs Itay, do not send them a cheerful
+    # "your order is on its way" on a different thread. The dry run caught a
+    # customer whose parcel had actually been cancelled at the pickup point.
+    in_trouble = {c[2]["email"] for c in classified if c[0] != "shipping"}
+
+    for kind, reason, item in classified:
         if len(result["sent"]) >= MAX_SEND:
             break
-        kind, reason = classify(item["subject"], item["body"])
-        if kind != "shipping":
+        if kind != "shipping" or item["email"] in in_trouble:
+            why = reason if kind != "shipping" else "has another open issue"
             result["handoff"].append({"email": item["email"], "name": item["name"],
-                                      "subject": item["subject"], "why": reason,
+                                      "subject": item["subject"], "why": why,
                                       "body": item["body"][:400]})
             continue
         if DRY_RUN:
