@@ -322,14 +322,30 @@ def main():
         log("FATAL no ANTHROPIC_API_KEY"); print("DONE sent=0 escalated=0"); return
     M = imap_connect()
     M.select("INBOX")
-    typ, data = M.search(None, "UNSEEN")
-    ids = data[0].split() if data and data[0] else []
-    log(f"unseen={len(ids)} cap={MAX_PER_RUN} send={ENABLE_SEND}")
+    # Server-side dedup. Asking Gmail for "unseen and not already labelled" costs
+    # one round trip; checking the label per message used to cost one fetch per
+    # unseen mail (~280/run on studio), which is what tripped the 60s socket
+    # timeout and failed the run.
+    ids = []
+    try:
+        typ, data = M.search(None, "UNSEEN", "NOT", "X-GM-LABELS", f'"{DONE_LABEL}"')
+        if typ == "OK":
+            ids = data[0].split() if data and data[0] else []
+        else:
+            raise imaplib.IMAP4.error(f"search typ={typ}")
+    except imaplib.IMAP4.error as e:
+        log("label-search unsupported, falling back:", repr(e))
+        typ, data = M.search(None, "UNSEEN")
+        ids = data[0].split() if data and data[0] else []
+        ids = [n for n in ids if DONE_LABEL not in msg_labels(M, n)]
+    log(f"todo={len(ids)} cap={MAX_PER_RUN} send={ENABLE_SEND}")
     sent = escalated = skipped = 0
     for num in reversed(ids):
         if sent + escalated >= MAX_PER_RUN:
             break
-        # durable dedup: skip anything we already handled in a previous cloud run
+        # Belt and braces: the search above should already exclude handled mail,
+        # but re-answering a customer is expensive, so confirm the label on the
+        # few messages we are actually about to touch.
         if DONE_LABEL in msg_labels(M, num):
             continue
         typ, md = M.fetch(num, "(BODY.PEEK[])")
@@ -402,4 +418,12 @@ def main():
     log(f"DONE sent={sent} escalated={escalated} skipped={skipped}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, imaplib.IMAP4.error) as e:
+        # A transient Gmail/IMAP hiccup is not a bug worth a failed-run email on
+        # every cron tick. Log it loudly and exit clean; the supervisor already
+        # alerts when runs go stale or the backlog grows, so a real outage is
+        # still caught.
+        log(f"TRANSIENT imap/net error, exiting clean: {e!r}")
+        print("DONE sent=0 escalated=0 transient=1")
