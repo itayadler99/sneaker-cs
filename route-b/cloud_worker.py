@@ -53,6 +53,7 @@ TG_CHAT = env("TELEGRAM_CHAT_ID")
 DRAFTS_BOX = "[Gmail]/Drafts"
 SENT_BOX = "[Gmail]/Sent Mail"
 DONE_LABEL = "cs-bot-seen"   # Gmail label = durable state (the cloud disk is ephemeral)
+BOT_HEADER = "X-CS-Bot"      # stamped on machine-written mail so learn.py can exclude it
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KB = open(os.path.join(ROOT, "kb", "knowledge-base.md"), encoding="utf-8").read()
 # few-shot bank distilled from REAL human-sent replies (learn.py). Makes the bot
@@ -292,6 +293,10 @@ def send_reply(to_addr, to_name, subject, body, in_reply_to, references):
     em["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
     em["Date"] = formatdate(localtime=True)
     em["Message-ID"] = make_msgid(domain=USER.split("@")[-1])
+    # Machine-readable provenance. learn.py treats Sent Mail as the human gold
+    # standard; without this stamp it would distil the bot's own replies back
+    # into the few-shot bank and slowly drift away from how Itay actually writes.
+    em[BOT_HEADER] = "cloud-worker"
     if in_reply_to:
         em["In-Reply-To"] = in_reply_to
         em["References"] = (references + " " + in_reply_to).strip() if references else in_reply_to
@@ -398,6 +403,7 @@ def main():
                 em["From"] = f"{STORE_NAME} <{USER}>"
                 em["To"] = sender_email
                 em["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+                em[BOT_HEADER] = "cloud-worker-draft"
                 if res.get("reply"):
                     em.set_content(res["reply"])
                 else:

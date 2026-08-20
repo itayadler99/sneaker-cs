@@ -39,6 +39,7 @@ TG_CHAT = env("TELEGRAM_CHAT_ID")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEARNED_PATH = os.path.join(ROOT, "kb", f"learned-{STORE}.md")
 SENT_BOX = "[Gmail]/Sent Mail"
+BOT_HEADER = "X-CS-Bot"   # cloud_worker stamps this on machine-written mail
 
 def log(*a):
     print(time.strftime("%Y-%m-%dT%H:%M:%S"), "learn", STORE, *a, flush=True)
@@ -124,6 +125,7 @@ def collect_pairs():
     ids = data[0].split() if data and data[0] else []
     log(f"sent in last {LOOKBACK_DAYS}d = {len(ids)}")
     pairs = []
+    bot_skipped = 0
     for num in reversed(ids):
         if len(pairs) >= MAX_PAIRS:
             break
@@ -131,6 +133,12 @@ def collect_pairs():
         if typ != "OK" or not md or not md[0]:
             continue
         msg = email.message_from_bytes(md[0][1])
+        # Never learn from our own output. This bank exists to imitate a real
+        # human; distilling machine replies back into it compounds the bot's own
+        # quirks a little more every day until it is only imitating itself.
+        if msg.get(BOT_HEADER):
+            bot_skipped += 1
+            continue
         subject = dh(msg.get("Subject", ""))
         answer, question = split_reply(get_body(msg))
         # skip empties, pure auto-notifications, and tiny one-liners
@@ -144,6 +152,7 @@ def collect_pairs():
             "answer": answer[:900],
         })
     M.logout()
+    log(f"human pairs={len(pairs)} bot-written skipped={bot_skipped}")
     return pairs
 
 DISTILL_PROMPT = """אתה מאמן את צוות שירות הלקוחות של חנות הסניקרס {store}.
