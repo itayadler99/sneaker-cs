@@ -150,15 +150,44 @@ def get_body(msg):
     except Exception:
         return ""
 
-def quote_top(body):
+# Where a quoted thread begins. The old version matched only two English/Hebrew
+# forms anchored at line start, and Gmail in Hebrew prefixes the line with an RTL
+# mark (U+200F) so the anchor never matched: the whole thread leaked into the
+# prompt and the model echoed it back at the customer.
+BIDI = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+QUOTE_START = re.compile(
+    r"^\s*(On .+wrote:|בתאריך .+(מאת|כתב)|-{2,}\s*(Original Message|הודעה מקורית)|"
+    r"(From|Sent|מאת|נשלח):\s|_{5,}|Forwarded message)", re.I)
+
+def strip_thread(body):
+    """Only the part the customer actually typed now."""
     lines = []
     for ln in body.splitlines():
-        if re.match(r"^\s*(On .+wrote:|בתאריך .+מאת)", ln):
+        clean = BIDI.sub("", ln)
+        if QUOTE_START.match(clean):
             break
-        if ln.strip().startswith(">"):
+        if clean.strip().startswith(">"):
             continue
-        lines.append(ln)
-    return "\n".join(lines).strip() or body.strip()
+        lines.append(clean)
+    return "\n".join(lines).strip() or BIDI.sub("", body).strip()
+
+quote_top = strip_thread   # old name, still used elsewhere
+
+# Typos the model has actually produced and shipped to customers. A rule in the
+# prompt did not stop them; a substitution does.
+TYPOS = {"משלןח": "משלוח", "הזמנח": "הזמנה", "תודח": "תודה", "שלןם": "שלום"}
+
+def clean_reply(text):
+    text = BIDI.sub("", text or "")
+    out = []
+    for ln in text.splitlines():
+        if QUOTE_START.match(ln) or ln.strip().startswith(">"):
+            break          # never quote the thread back at the customer
+        out.append(ln)
+    text = "\n".join(out)
+    for bad, good in TYPOS.items():
+        text = text.replace(bad, good)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 # ---- Shopify order lookup (live source of truth, injected into the prompt) ----
 ORDER_GQL = """{ orders(first: 5, query: %s) { edges { node {
@@ -234,10 +263,19 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 - תלונה, נזק, מוצר פגום, החזר כספי, החלפה, ביטול, איום משפטי, או כל מקרה שאת לא בטוחה בו = אל תכתבי תשובה, החזרי action=escalate.
 
 טון ושפה — שיישמע אנושי:
-- עברית תקנית וטבעית, כמו אדם אמיתי שכותב ללקוח.
+- עברית תקנית וטבעית, כמו אדם אמיתי שכותב ללקוח. בדקי איות לפני שאת מחזירה.
 - חם, אישי, קצר וענייני. פני ללקוח בשמו הפרטי.
 - בלי מקפים ארוכים. בלי סופרלטיבים. בלי ניסוחים רובוטיים או תבניתיים. בלי "אני כאן כדי לעזור" וקלישאות בוט.
 - חתמי בצורה טבעית בשם החנות.
+
+מבנה התשובה — חובה, שלושת החלקים:
+1. פנייה בשם הלקוח ומשפט קצר שמראה שקראת מה הוא כתב.
+2. התשובה עצמה לפי נתוני ההזמנה.
+3. משפט סיום שמזמין אותו לחזור אלינו אם צריך.
+תשובה של שורה אחת יבשה נחשבת כישלון גם אם היא נכונה עובדתית.
+
+⛔ אסור להעתיק לתוך התשובה את המייל של הלקוח, שורות שמתחילות ב-">", או היסטוריית התכתבות.
+כתבי רק את הטקסט החדש שלך.
 
 החזירי אך ורק JSON שורה אחת, בלי טקסט נוסף:
 {{"action":"draft"|"escalate","reply":"<תשובה מלאה בעברית עם ירידות שורה כ-\\n>","confidence":0.0-1.0,"reason":"<קצר>","order_found":true|false,"order_number":"<מספר או ריק>"}}
@@ -299,6 +337,10 @@ def ask_brain(sender_name, sender_email, subject, message):
         return {"action": "escalate", "reason": "unparseable brain json"}
     if j.get("action") != "draft" or not j.get("reply"):
         return {"action": "escalate", "reason": j.get("reason", "low confidence")}
+    j["reply"] = clean_reply(j["reply"])
+    # A two-word answer reads as a brush-off. Better a human writes it.
+    if len(j["reply"]) < 60:
+        return {"action": "escalate", "reason": "reply too curt"}
     return j
 
 # ---- send (SMTP) + archive a copy to Sent ----
