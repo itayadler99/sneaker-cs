@@ -204,6 +204,11 @@ def sample_sent(cfg, n):
             if typ != "OK" or not md or not md[0]:
                 continue
             msg = email.message_from_bytes(md[0][1])
+            # Our own alert mail to Itay leaves the store mailbox too. Grading it
+            # as if it were a customer reply scored station 1/10 for "internal
+            # reports sent to customers" — a measurement artefact, not an incident.
+            if email.utils.parseaddr(msg.get("To", ""))[1].lower() == OWNER_EMAIL.lower():
+                continue
             subj = dh(msg.get("Subject", ""))
             body = ""
             if msg.is_multipart():
