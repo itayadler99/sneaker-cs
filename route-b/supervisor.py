@@ -181,7 +181,16 @@ def check_workflow():
 
 # ---- sample recent auto-sent replies and grade them ----
 def sample_sent(cfg, n):
+    """(graded samples, rogue-autoresponder finding).
+
+    The second value exists because station has a legacy Apps Script that may or
+    may not still be replying on its own. Two autoresponders on one mailbox means
+    a customer gets answered twice, so before turning sending on we need evidence,
+    not a guess. A template sender leaves a signature: the same opening line sent
+    to several different people, with no X-CS-Bot stamp on it (we stamp ours).
+    """
     samples = []
+    fp = {}
     try:
         M = imaplib.IMAP4_SSL("imap.gmail.com")
         M.login(cfg["user"], cfg["pw"])
@@ -212,12 +221,22 @@ def sample_sent(cfg, n):
                 except Exception:
                     pass
             body = re.split(r"\n\s*(On .+wrote:|בתאריך)", body)[0].strip()
-            if body and len(body) > 20:
-                samples.append({"subject": subj, "reply": body[:700]})
+            if not body or len(body) <= 20:
+                continue
+            samples.append({"subject": subj, "reply": body[:700]})
+            if not msg.get("X-CS-Bot"):
+                key = re.sub(r"\s+", " ", body)[:100]
+                fp.setdefault(key, set()).add(
+                    email.utils.parseaddr(msg.get("To", ""))[1].lower())
         M.logout()
     except Exception as e:
         log("sample warn", cfg["name"], repr(e))
-    return samples
+    rogue = ""
+    for key, tos in fp.items():
+        if len(tos) >= 3:
+            rogue = f"{len(tos)} נמענים שונים קיבלו את אותו פתיח: \"{key[:60]}\""
+            break
+    return samples, rogue
 
 GRADE_PROMPT = """אתה מנהל שירות לקוחות בכיר בחנות סניקרס ({store}).
 לפניך תשובות אחרונות שנשלחו ללקוחות. דרג את האיכות הכוללת: כמה הן אנושיות, חמות,
@@ -305,7 +324,13 @@ def main():
             lines.append("   📮 לא הצלחתי למדוד אחוז מענה")
 
         # grade recent replies
-        g = grade(cfg["name"], sample_sent(cfg, SAMPLE_REPLIES))
+        samples, rogue = sample_sent(cfg, SAMPLE_REPLIES)
+        if rogue:
+            lines.append(f"   🤖 עונה אוטומטי נוסף בתיבה: {rogue}")
+            alerts.append(f"⚠️ {cfg['name']}: נראה שיש עונה אוטומטי נוסף — {rogue}")
+        else:
+            lines.append("   🤖 אין עונה אוטומטי זר בתיבה")
+        g = grade(cfg["name"], samples)
         if g:
             lines.append(f"   📊 איכות תשובות: {g.get('score','?')}/10 — {g.get('verdict','')}")
             if g.get("fix"):

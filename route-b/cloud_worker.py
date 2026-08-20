@@ -46,7 +46,23 @@ MODEL = env("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 API_VER = "2024-10"
 MAX_PER_RUN = int(env("MAX_PER_RUN", "6"))
 MIN_CONF = float(env("MIN_CONF", "0.80"))
-ENABLE_SEND = env("ENABLE_SEND", "1") not in ("0", "false", "no", "")
+
+# Whether a store actually sends is decided here, in the repo, not only in the
+# workflow yaml. The yaml pins ENABLE_SEND per store and changing it needs a
+# token scope we do not have, which is how station sat in draft-only mode for
+# months while everyone assumed customers were being answered. This file is the
+# switch we can reach; the env var stays as the fallback.
+def _send_policy(store):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "send_policy.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f).get(store)
+    except Exception:
+        return None
+
+_policy = _send_policy(STORE)
+ENABLE_SEND = (bool(_policy) if _policy is not None
+               else env("ENABLE_SEND", "1") not in ("0", "false", "no", ""))
 TG_TOKEN = env("TELEGRAM_BOT_TOKEN")
 TG_CHAT = env("TELEGRAM_CHAT_ID")
 

@@ -1,0 +1,5 @@
+{
+  "_comment": "true = the bot sends replies for this store. false = drafts only. Read by cloud_worker.py; overrides ENABLE_SEND in the workflow yaml.",
+  "station": false,
+  "studio": true
+}
