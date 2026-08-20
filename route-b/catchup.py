@@ -32,7 +32,7 @@ def env(k, d=""):
 
 DAYS = int(env("CATCHUP_DAYS", "7"))
 MAX_SEND = int(env("CATCHUP_MAX", "40"))
-DRY_RUN = env("CATCHUP_DRY_RUN", "1") != "0"
+DRY_RUN = env("CATCHUP_DRY_RUN", "0") != "0"
 DONE_LABEL = "cs-bot-seen"
 OWNER_EMAIL = env("OWNER_EMAIL", "itayadler99@gmail.com")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
