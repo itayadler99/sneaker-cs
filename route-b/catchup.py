@@ -186,40 +186,58 @@ def find_unanswered(user, pw):
                 answered.add(m.group(1).decode())
 
     M.select("INBOX", readonly=False)
+
+    # Pass 1: headers only, batched. A mailbox with a few hundred messages in the
+    # window cannot afford one full-body fetch each - that is what timed out.
+    HDRS = "From Subject Message-ID References List-Unsubscribe Precedence"
+    candidates = []
+    for i in range(0, len(inbox_ids), 100):
+        spec = b",".join(inbox_ids[i:i + 100]).decode()
+        typ, md = M.fetch(spec, f"(X-GM-THRID BODY.PEEK[HEADER.FIELDS ({HDRS})])")
+        if typ != "OK":
+            continue
+        for item in md:
+            if not isinstance(item, tuple) or len(item) < 2:
+                continue
+            m = THRID.search(item[0])
+            num = re.match(rb"\s*(\d+)", item[0])
+            if not m or not num:
+                continue
+            thrid = m.group(1).decode()
+            if thrid in answered:
+                continue
+            hdr = email.message_from_bytes(item[1])
+            name, addr = email.utils.parseaddr(hdr.get("From", ""))
+            addr = addr.lower()
+            if not addr or addr == me or IGNORE_SENDER.search(addr):
+                continue
+            # Bulk mail always carries an unsubscribe header. Real customers writing
+            # from their own mailbox never do, so this is a cleaner filter than
+            # chasing sender domains, and it keeps newsletters out of Itay's list.
+            if hdr.get("List-Unsubscribe") or hdr.get("Precedence") in ("bulk", "list"):
+                continue
+            subject = dh(hdr.get("Subject", ""))
+            if re.search(r"order\s+#?\d+\s+placed|\[Sneaker", subject, re.I):
+                continue
+            candidates.append({
+                "num": num.group(1), "thrid": thrid, "email": addr,
+                "name": dh(name), "subject": subject,
+                "msgid": (hdr.get("Message-ID") or "").strip(),
+                "refs": dh(hdr.get("References", "")),
+            })
+            answered.add(thrid)   # one reply per thread, not per message
+
+    # Pass 2: bodies, only for what survived. Small enough to fetch one by one.
     todo = []
-    for num in inbox_ids:
-        typ, md = M.fetch(num, "(X-GM-THRID BODY.PEEK[])")
+    for c in candidates:
+        typ, md = M.fetch(c["num"], "(BODY.PEEK[])")
         if typ != "OK" or not md or not isinstance(md[0], tuple):
             continue
-        m = THRID.search(md[0][0])
-        if not m:
-            continue
-        thrid = m.group(1).decode()
-        if thrid in answered:
-            continue
-        msg = email.message_from_bytes(md[0][1])
-        name, addr = email.utils.parseaddr(msg.get("From", ""))
-        addr = addr.lower()
-        if not addr or addr == me or IGNORE_SENDER.search(addr):
-            continue
-        # Bulk mail always carries an unsubscribe header. Real customers writing
-        # from their own mailbox never do, so this is a cleaner filter than
-        # chasing sender domains, and it keeps newsletters out of Itay's list.
-        if msg.get("List-Unsubscribe") or msg.get("Precedence") in ("bulk", "list"):
-            continue
-        subject = dh(msg.get("Subject", ""))
-        if re.search(r"order\s+#?\d+\s+placed|\[Sneaker", subject, re.I):
-            continue
-        body = strip_quote(get_body(msg))
+        body = strip_quote(get_body(email.message_from_bytes(md[0][1])))
         if not body:
             continue
-        todo.append({
-            "num": num, "thrid": thrid, "email": addr, "name": dh(name),
-            "subject": subject, "body": body,
-            "msgid": (msg.get("Message-ID") or "").strip(),
-            "refs": dh(msg.get("References", "")),
-        })
-        answered.add(thrid)   # one reply per thread, not per message
+        c["body"] = body
+        todo.append(c)
     return M, todo
 
 
