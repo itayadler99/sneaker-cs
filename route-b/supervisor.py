@@ -326,5 +326,14 @@ def main():
         tg(digest)
     print("DONE supervisor alerts=%d" % len(alerts))
 
+    # Sweep for customers who were never answered at all. Lives here because the
+    # supervisor already holds every credential it needs and runs on a schedule.
+    # Defaults to a dry run; see catchup.py for what it will and will not touch.
+    try:
+        import catchup
+        catchup.main()
+    except Exception as e:
+        log("catchup warn", repr(e))
+
 if __name__ == "__main__":
     main()
