@@ -7,10 +7,13 @@
 #
 # Runs headless in GitHub Actions on its own cron. Authorized owner automation.
 
-import imaplib, email, json, os, re, time
+import imaplib, smtplib, email, json, os, re, time
 import urllib.request, urllib.parse
 from email.header import decode_header, make_header
+from email.message import EmailMessage
 from datetime import datetime, timezone
+
+from diagnose import answer_rate
 
 def env(k, d=""):
     return (os.environ.get(k, d) or "").strip()
@@ -24,6 +27,9 @@ GH_REPO = env("GITHUB_REPOSITORY", "itayadler99/sneaker-cs")
 BACKLOG_ALERT = int(env("SUPERVISOR_BACKLOG_ALERT", "40"))   # unhandled unseen -> alert
 STALE_HOURS = int(env("SUPERVISOR_STALE_HOURS", "2"))        # no successful run in N h -> alert
 SAMPLE_REPLIES = int(env("SUPERVISOR_SAMPLE_REPLIES", "5"))  # recent sent to grade
+ANSWER_RATE_DAYS = int(env("SUPERVISOR_ANSWER_DAYS", "14"))  # window for the answer-rate audit
+UNANSWERED_ALERT = int(env("SUPERVISOR_UNANSWERED_ALERT", "3"))  # customers with no reply -> alert
+OWNER_EMAIL = env("OWNER_EMAIL", "itayadler99@gmail.com")    # Itay reads mail, not Telegram
 
 DONE_LABEL = "cs-bot-seen"
 SENT_BOX = "[Gmail]/Sent Mail"
@@ -57,6 +63,27 @@ def tg(msg):
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data, timeout=15)
     except Exception as e:
         log("tg warn", repr(e))
+
+def mail_owner(subject, body):
+    """Telegram digests go unread, so anything urgent also lands in Itay's inbox."""
+    cfg = STORES["station"]
+    user, pw = cfg["user"], cfg["pw"]
+    if not user or not pw or not OWNER_EMAIL:
+        return
+    try:
+        em = EmailMessage()
+        em["From"] = f"CS Supervisor <{user}>"
+        em["To"] = OWNER_EMAIL
+        em["Subject"] = subject
+        em["X-CS-Bot"] = "supervisor"   # keep it out of the learning bank
+        em.set_content(body)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+            s.login(user, pw)
+            s.send_message(em)
+        log("emailed owner")
+    except Exception as e:
+        log("owner-mail warn", repr(e))
+
 
 def dh(v):
     if not v:
@@ -261,6 +288,22 @@ def main():
             alerts.append(f"⚠️ {cfg['name']}: Shopify לא מגיב — הבוט לא ישלוף הזמנות.")
         if mb["backlog"] >= BACKLOG_ALERT:
             alerts.append(f"⚠️ {cfg['name']}: ערימה של {mb['backlog']} פניות ממתינות.")
+        # The metric that is actually about the customer. Everything above can be
+        # green while nobody gets a reply.
+        try:
+            ar = answer_rate(cfg["user"], cfg["pw"], ANSWER_RATE_DAYS)
+            lines.append(
+                f"   📮 נענו {ar['rate']}% מהפניות ב-{ar['days']} יום "
+                f"({ar['total']} פניות: {ar['by_bot']} בוט, {ar['by_human']} אדם, "
+                f"{ar['unanswered']} ללא מענה)")
+            if ar["unanswered"] >= UNANSWERED_ALERT:
+                names = ", ".join(f"{f}" for f, _ in ar["examples"][:5])
+                alerts.append(
+                    f"⛔ {cfg['name']}: {ar['unanswered']} לקוחות לא קיבלו תשובה בכלל. {names}")
+        except Exception as e:
+            log("answer-rate warn", repr(e))
+            lines.append("   📮 לא הצלחתי למדוד אחוז מענה")
+
         # grade recent replies
         g = grade(cfg["name"], sample_sent(cfg, SAMPLE_REPLIES))
         if g:
@@ -276,7 +319,9 @@ def main():
     digest = "\n".join(lines)
     log(digest)
     if alerts:
-        tg("🚨 התראת מפקח:\n" + "\n".join(alerts) + "\n\n" + digest)
+        body = "🚨 התראת מפקח:\n" + "\n".join(alerts) + "\n\n" + digest
+        tg(body)
+        mail_owner(f"[שירות לקוחות] {len(alerts)} בעיות דורשות טיפול", body)
     else:
         tg(digest)
     print("DONE supervisor alerts=%d" % len(alerts))
