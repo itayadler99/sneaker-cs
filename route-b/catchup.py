@@ -15,6 +15,9 @@
 # Owner-authorised automation on the stores' own mailboxes.
 
 import imaplib, smtplib, email, json, os, re, time, socket
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from promise_guard import violation
 import urllib.request
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -242,9 +245,16 @@ def find_unanswered(user, pw):
 
 
 def send_reply(M, user, pw, store_name, item):
+    # The canned templates promise nothing today, but a future edit must not be
+    # able to slip a refund/cancellation offer past review. Same guard the live
+    # worker uses (2026-08-24 incident).
     body_is_hebrew = bool(re.search(r"[\u0590-\u05FF]", item["body"]))
     tpl = REPLY_HE if body_is_hebrew else REPLY_EN
     text = tpl.format(name=first_name(item["name"], item["email"]), store=store_name)
+    promised = violation(text)
+    if promised:
+        log(f"BLOCKED-PROMISE catchup template promises \"{promised}\" — not sending")
+        raise RuntimeError(f"catchup template promises '{promised}'")
 
     em = EmailMessage()
     em["From"] = f"{store_name} <{user}>"

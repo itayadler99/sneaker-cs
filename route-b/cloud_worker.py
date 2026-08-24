@@ -93,6 +93,16 @@ SENSITIVE = re.compile(
     re.I,
 )
 
+# ---- OUTGOING guard (added 2026-08-24 after a live incident) ----
+# SENSITIVE above only reads the CUSTOMER's mail. A plain stock question carries
+# no sensitive keyword, so it passes — and on 2026-08-24 the model volunteered a
+# full refund + cancellation on its own and the mail shipped. So we also read
+# what the bot is ABOUT TO SAY. Rules live in promise_guard.py, shared with
+# catchup.py, so there is exactly one list to maintain.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from promise_guard import violation as outgoing_violation
+
+
 def log(*a):
     print(time.strftime("%Y-%m-%dT%H:%M:%S"), STORE, *a, flush=True)
 
@@ -106,6 +116,27 @@ def tg(msg):
     except Exception as e:
         # never fail the run over Telegram, but never fail silently either
         log("TELEGRAM-FAIL", repr(e))
+
+OWNER_EMAIL = env("OWNER_EMAIL", "itayadler99@gmail.com")
+
+def mail_owner(subject, body):
+    """Itay does not read Telegram. Anything he must actually see goes to his
+    inbox as well (feedback_itay_never_reads_telegram)."""
+    if not USER or not APP_PW or not OWNER_EMAIL:
+        return
+    try:
+        em = EmailMessage()
+        em["From"] = f"{STORE_NAME} CS Bot <{USER}>"
+        em["To"] = OWNER_EMAIL
+        em["Subject"] = subject
+        em[BOT_HEADER] = "cloud-worker-alert"   # keep it out of the learning bank
+        em.set_content(body)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+            s.login(USER, APP_PW)
+            s.send_message(em)
+        log("emailed owner")
+    except Exception as e:
+        log("owner-mail warn", repr(e))
 
 def msg_labels(imap, num):
     """Gmail labels on a message (used as durable processed-state in the cloud)."""
@@ -259,7 +290,11 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 - אם לא מצאת הזמנה תואמת, וזו שאלה כללית של "איפה ההזמנה/מתי יגיע" — תני הרגעה כללית לפי הקשר העיכובים בידע, בלי להמציא מספר מעקב או תאריך.
 - אם הלקוח שואל על משהו שאי אפשר לאמת מהנתונים — escalate.
 
-שלב 3 — מתי לא לענות (escalate):
+שלב 3 — אסור בהחלט להציע (גם אם הלקוח לא ביקש):
+- אסור להציע, לרמוז או להזכיר כאפשרות: החזר כספי, ביטול הזמנה, זיכוי, החלפה, פיצוי, קופון, הנחה, או כל ויתור כספי אחר. גם לא בנימוס, גם לא כ"אם תעדיפי". ההחלטות האלה שייכות לבעל החנות בלבד.
+- אם נראה לך שהלקוח צריך אחת מהאפשרויות האלה, זו בדיוק הסיבה להחזיר action=escalate ולא לכתוב תשובה.
+
+שלב 4 — מתי לא לענות (escalate):
 - תלונה, נזק, מוצר פגום, החזר כספי, החלפה, ביטול, איום משפטי, או כל מקרה שאת לא בטוחה בו = אל תכתבי תשובה, החזרי action=escalate.
 
 טון ושפה — שיישמע אנושי:
@@ -430,8 +465,19 @@ def main():
         res = ask_brain(sender_name, sender_email, subject, body)
         conf = float(res.get("confidence") or 0)
         sensitive = bool(SENSITIVE.search(subject + " " + body))
+        # Read the reply we are about to send, not only the mail we received.
+        promised = outgoing_violation(res.get("reply", ""))
         can_send = (res.get("action") == "draft" and conf >= MIN_CONF
-                    and not sensitive and ENABLE_SEND)
+                    and not sensitive and not promised and ENABLE_SEND)
+        if promised:
+            log(f"BLOCKED-PROMISE {sender_email} | \"{promised}\" | conf={conf}")
+            mail_owner(
+                f"🚩 {STORE_NAME}: הבוט ניסה להציע ללקוח \"{promised}\" — נחסם",
+                f"לקוח: {sender_name} <{sender_email}>\n"
+                f"נושא: {subject}\n"
+                f"הביטוי שנחסם: {promised}\n\n"
+                f"--- פניית הלקוח ---\n{body[:1200]}\n\n"
+                f"--- מה שהבוט רצה לשלוח (לא נשלח, יושב כטיוטה) ---\n{res.get('reply','')}\n")
 
         if can_send:
             try:
@@ -470,7 +516,8 @@ def main():
             except Exception:
                 pass
             escalated += 1
-            why = "רגיש" if sensitive else res.get("reason", f"conf={conf}")
+            why = (f"🚩 הבוט ניסה להבטיח \"{promised}\" — נחסם" if promised
+                   else "רגיש" if sensitive else res.get("reason", f"conf={conf}"))
             log(f"ESCAL {sender_email} | {subject[:40]} | {why}")
             tg(f"📥 {STORE_NAME} — פנייה הושארה לך (לא נשלח, טיוטה ב-Gmail)\n"
                f"מ: {sender_name} <{sender_email}>\n"
