@@ -1,3 +1,8 @@
 node_modules/
 .env
 *.log
+route-b/health.json
+route-b/processed.json
+route-b/starve_test_state.json
+route-b/.watchdog_last_alert
+route-b/*.log

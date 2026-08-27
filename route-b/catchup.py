@@ -18,6 +18,7 @@ import imaplib, smtplib, email, json, os, re, time, socket
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from promise_guard import violation
+from order_claim_guard import violation as order_claim_violation
 import urllib.request
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -90,6 +91,40 @@ If there is anything else, we are here.
 
 {store}
 """
+
+
+API_VER = "2024-10"
+
+# The template below tells the customer their order is on its way. Until
+# 2026-08-26 nothing checked that an order existed: לאה שירזי, who has never
+# bought from either store, was told her parcel was in transit and spent three
+# weeks chasing it. This is the check that was missing.
+ORDER_EXISTS_GQL = """{ orders(first: 1, query: %s) { edges { node { name } } } }"""
+
+
+def has_order(shop_domain, token, email_addr):
+    """True only if Shopify returns an order for this address.
+
+    Returns None when we cannot ask (no credentials, API down). None is not
+    False: the caller must treat "unknown" as "do not send", never as "no order
+    so hand off quietly" - and never as permission to reassure.
+    """
+    if not shop_domain or not token or not email_addr:
+        return None
+    q = json.dumps(f"email:{email_addr}")
+    req = urllib.request.Request(
+        f"https://{shop_domain}/admin/api/{API_VER}/graphql.json",
+        data=json.dumps({"query": ORDER_EXISTS_GQL % q}).encode("utf-8"),
+        method="POST",
+        headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r).get("data") or {}
+        return bool(data.get("orders", {}).get("edges"))
+    except Exception as e:
+        log("shopify lookup failed", email_addr, repr(e))
+        return None
 
 
 def log(*a):
@@ -255,6 +290,14 @@ def send_reply(M, user, pw, store_name, item):
     if promised:
         log(f"BLOCKED-PROMISE catchup template promises \"{promised}\" — not sending")
         raise RuntimeError(f"catchup template promises '{promised}'")
+    # The template asserts the order is in transit, so it may only go to someone
+    # Shopify confirms has an order. run_store already filtered on this; this is
+    # the belt to that braces, and it is what makes the template safe to edit.
+    claimed = order_claim_violation(text, bool(item.get("has_order")))
+    if claimed:
+        kind, phrase = claimed
+        log(f"BLOCKED-CLAIM catchup would tell {item['email']} \"{phrase}\" ({kind}) with no order — not sending")
+        raise RuntimeError(f"catchup claims '{phrase}' ({kind}) but Shopify has no order for {item['email']}")
 
     em = EmailMessage()
     em["From"] = f"{store_name} <{user}>"
@@ -280,7 +323,7 @@ def send_reply(M, user, pw, store_name, item):
     return text
 
 
-def run_store(store_name, user, pw):
+def run_store(store_name, user, pw, shop_domain="", admin_token=""):
     result = {"store": store_name, "sent": [], "handoff": [], "error": ""}
     if not user or not pw:
         result["error"] = "no creds"
@@ -307,6 +350,19 @@ def run_store(store_name, user, pw):
             break
         if kind != "shipping" or item["email"] in in_trouble:
             why = reason if kind != "shipping" else "has another open issue"
+            result["handoff"].append({"email": item["email"], "name": item["name"],
+                                      "subject": item["subject"], "why": why,
+                                      "body": item["body"][:400]})
+            continue
+        # "Where is my order" is only answerable for someone who has one.
+        found = has_order(shop_domain, admin_token, item["email"])
+        item["has_order"] = bool(found)
+        if found is not True:
+            why = ("אין הזמנה ב-Shopify לפי המייל הזה — ייתכן שרכש בחנות אחרת, "
+                   "או הזמין תחת כתובת מייל אחרת"
+                   if found is False else
+                   "לא הצלחתי לבדוק מול Shopify (אין טוקן או שהקריאה נכשלה)")
+            log(f"NO-ORDER skip -> {item['email']} | {why}")
             result["handoff"].append({"email": item["email"], "name": item["name"],
                                       "subject": item["subject"], "why": why,
                                       "body": item["body"][:400]})
@@ -371,11 +427,13 @@ def main():
     station_user = env("STORE_GMAIL_USER")
     station_pw = env("STORE_GMAIL_APP_PASSWORD")
     stores = [
-        ("SneakerStation", station_user, station_pw),
+        ("SneakerStation", station_user, station_pw,
+         env("STATION_SHOP_DOMAIN"), env("STATION_ADMIN_TOKEN")),
         ("SneakerStudio", env("STUDIO_GMAIL_USER") or station_user,
-         env("STUDIO_GMAIL_APP_PASSWORD") or station_pw),
+         env("STUDIO_GMAIL_APP_PASSWORD") or station_pw,
+         env("STUDIO_SHOP_DOMAIN"), env("STUDIO_ADMIN_TOKEN")),
     ]
-    results = [run_store(n, u, p) for n, u, p in stores]
+    results = [run_store(n, u, p, d, t) for n, u, p, d, t in stores]
     owner_report(results, station_user, station_pw)
     total_sent = sum(len(r["sent"]) for r in results)
     total_hand = sum(len(r["handoff"]) for r in results)

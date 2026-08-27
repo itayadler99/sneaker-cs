@@ -101,6 +101,10 @@ SENSITIVE = re.compile(
 # catchup.py, so there is exactly one list to maintain.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from promise_guard import violation as outgoing_violation
+# Second outgoing gate (2026-08-26). promise_guard catches what the bot OFFERS;
+# this one catches what it ASSERTS — that the order exists and is moving, or
+# that the bot already changed something. Both were sent to real customers.
+from order_claim_guard import violation as order_claim_violation
 
 
 def log(*a):
@@ -332,8 +336,13 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 {message}
 """
 
-def ask_brain(sender_name, sender_email, subject, message):
-    orders_block = format_orders(find_orders(sender_email, message))
+def ask_brain(sender_name, sender_email, subject, message, orders=None):
+    # orders is passed in by main() so the same lookup result decides both what
+    # the model sees and whether order_claim_guard lets the reply out. Looking
+    # it up twice would let the two disagree.
+    if orders is None:
+        orders = find_orders(sender_email, message)
+    orders_block = format_orders(orders)
     prompt = PROMPT_TMPL.format(
         store=STORE_NAME, kb=KB, orders=orders_block,
         learned=LEARNED or "(עדיין אין דוגמאות נלמדות.)",
@@ -462,13 +471,33 @@ def main():
         if not body:
             mark_done(M, num); skipped += 1; continue
 
-        res = ask_brain(sender_name, sender_email, subject, body)
+        orders = find_orders(sender_email, body)
+        res = ask_brain(sender_name, sender_email, subject, body, orders)
         conf = float(res.get("confidence") or 0)
         sensitive = bool(SENSITIVE.search(subject + " " + body))
         # Read the reply we are about to send, not only the mail we received.
         promised = outgoing_violation(res.get("reply", ""))
+        # bool(orders) is Shopify's answer, not res["order_found"] — the model
+        # reports what it decided to believe, and on 2026-08-26 it believed a
+        # non-customer had an order in transit.
+        claimed = order_claim_violation(res.get("reply", ""), bool(orders))
         can_send = (res.get("action") == "draft" and conf >= MIN_CONF
-                    and not sensitive and not promised and ENABLE_SEND)
+                    and not sensitive and not promised and not claimed
+                    and ENABLE_SEND)
+        if claimed:
+            kind, phrase = claimed
+            why = ("הבוט טען שביצע פעולה שאין לו בכלל הרשאה לבצע (הטוקן קריאה בלבד)"
+                   if kind == "action-done" else
+                   "הבוט דיבר על מצב ההזמנה, אבל לא נמצאה שום הזמנה של הלקוח הזה ב-Shopify")
+            log(f"BLOCKED-CLAIM {sender_email} | {kind} | \"{phrase}\" | orders={len(orders)}")
+            mail_owner(
+                f"🚩 {STORE_NAME}: הבוט ניסה לטעון \"{phrase}\" — נחסם",
+                f"סוג החסימה: {kind}\n{why}\n\n"
+                f"לקוח: {sender_name} <{sender_email}>\n"
+                f"נושא: {subject}\n"
+                f"הזמנות שנמצאו ב-Shopify: {len(orders)}\n\n"
+                f"--- פניית הלקוח ---\n{body[:1200]}\n\n"
+                f"--- מה שהבוט רצה לשלוח (לא נשלח, יושב כטיוטה) ---\n{res.get('reply','')}\n")
         if promised:
             log(f"BLOCKED-PROMISE {sender_email} | \"{promised}\" | conf={conf}")
             mail_owner(
