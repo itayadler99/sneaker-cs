@@ -301,6 +301,17 @@ def find_unanswered(user, pw):
     return M, todo
 
 
+# Gmail folds long headers across lines. A thread with a dozen messages has a
+# References header containing real CRLFs, and EmailMessage refuses those:
+# "Header values may not contain linefeed or carriage return characters". The
+# live run on 2026-08-27 failed exactly this way on the ONE customer it wanted
+# to answer - and the failure mode is cruel, because the longest References
+# header belongs to the customer who has written the most times.
+def hdr(value):
+    """Flatten any header value to a single line."""
+    return re.sub(r"\s+", " ", (value or "")).strip()
+
+
 def send_reply(M, user, pw, store_name, item):
     # The canned templates promise nothing today, but a future edit must not be
     # able to slip a refund/cancellation offer past review. Same guard the live
@@ -324,13 +335,14 @@ def send_reply(M, user, pw, store_name, item):
     em = EmailMessage()
     em["From"] = f"{store_name} <{user}>"
     em["To"] = item["email"]
-    em["Subject"] = item["subject"] if item["subject"].lower().startswith("re:") else f"Re: {item['subject']}"
+    subj = hdr(item["subject"])
+    em["Subject"] = subj if subj.lower().startswith("re:") else f"Re: {subj}"
     em["Date"] = formatdate(localtime=True)
     em["Message-ID"] = make_msgid(domain=user.split("@")[-1])
     em[BOT_HEADER] = "catchup"
     if item["msgid"]:
-        em["In-Reply-To"] = item["msgid"]
-        em["References"] = (item["refs"] + " " + item["msgid"]).strip()
+        em["In-Reply-To"] = hdr(item["msgid"])
+        em["References"] = hdr(item["refs"] + " " + item["msgid"])
     em.set_content(text)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:

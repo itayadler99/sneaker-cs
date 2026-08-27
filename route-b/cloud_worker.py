@@ -388,10 +388,22 @@ def ask_brain(sender_name, sender_email, subject, message, orders=None):
     return j
 
 # ---- send (SMTP) + archive a copy to Sent ----
+# Gmail folds long headers across lines. A thread with a dozen messages has a
+# References header containing real CRLFs, and EmailMessage refuses those:
+# "Header values may not contain linefeed or carriage return characters". The
+# live run on 2026-08-27 failed exactly this way on the ONE customer it wanted
+# to answer - and the failure mode is cruel, because the longest References
+# header belongs to the customer who has written the most times.
+def hdr(value):
+    """Flatten any header value to a single line."""
+    return re.sub(r"\s+", " ", (value or "")).strip()
+
+
 def send_reply(to_addr, to_name, subject, body, in_reply_to, references):
     em = EmailMessage()
     em["From"] = f"{STORE_NAME} <{USER}>"
     em["To"] = f"{to_name} <{to_addr}>" if to_name else to_addr
+    subject = hdr(subject)
     em["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
     em["Date"] = formatdate(localtime=True)
     em["Message-ID"] = make_msgid(domain=USER.split("@")[-1])
@@ -400,8 +412,8 @@ def send_reply(to_addr, to_name, subject, body, in_reply_to, references):
     # into the few-shot bank and slowly drift away from how Itay actually writes.
     em[BOT_HEADER] = "cloud-worker"
     if in_reply_to:
-        em["In-Reply-To"] = in_reply_to
-        em["References"] = (references + " " + in_reply_to).strip() if references else in_reply_to
+        em["In-Reply-To"] = hdr(in_reply_to)
+        em["References"] = hdr(f"{references} {in_reply_to}") if references else hdr(in_reply_to)
     em.set_content(body)
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
         s.login(USER, APP_PW)
@@ -535,7 +547,7 @@ def main():
                 em = EmailMessage()
                 em["From"] = f"{STORE_NAME} <{USER}>"
                 em["To"] = sender_email
-                em["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+                em["Subject"] = hdr(subject) if subject.lower().startswith("re:") else f"Re: {hdr(subject)}"
                 em[BOT_HEADER] = "cloud-worker-draft"
                 if res.get("reply"):
                     em.set_content(res["reply"])
