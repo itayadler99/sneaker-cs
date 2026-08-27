@@ -1,0 +1,65 @@
+name: sneaker-cs catchup
+
+# Closes the gap cs-bot cannot see. cs-bot only ever looks at UNSEEN mail, so a
+# customer whose message was opened and then forgotten is invisible to it
+# forever. catchup.py re-reads the last week, finds threads with no reply at
+# all, and answers the "where is my order" ones.
+#
+# Daily rather than hourly on purpose: it is a sweep, not a responder. cs-bot
+# handles anything fresh within 15 minutes; whatever is still unanswered a day
+# later is exactly what this is for.
+#
+# Safety, in the script not in this file: only "shipping" questions are
+# answered, anyone with a money/damage/change thread is handed to Itay untouched,
+# promise_guard blocks the reply if the template ever starts offering money, and
+# order_claim_guard blocks it unless Shopify confirms the sender actually has an
+# order. Everything it does not send is emailed to Itay as a handoff list.
+on:
+  schedule:
+    - cron: "10 6 * * *"     # 06:10 UTC = 09:10 Israel, before the day's mail lands
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = report only, send nothing"
+        required: false
+        default: "0"
+      days:
+        description: "How many days back to sweep"
+        required: false
+        default: "7"
+
+concurrency:
+  group: cs-catchup
+  cancel-in-progress: false
+
+jobs:
+  catchup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+      STORE_GMAIL_USER: ${{ secrets.STORE_GMAIL_USER }}
+      STORE_GMAIL_APP_PASSWORD: ${{ secrets.STORE_GMAIL_APP_PASSWORD }}
+      STUDIO_GMAIL_USER: ${{ secrets.STUDIO_GMAIL_USER }}
+      STUDIO_GMAIL_APP_PASSWORD: ${{ secrets.STUDIO_GMAIL_APP_PASSWORD }}
+      # Required, not optional: without these order_claim_guard has no way to
+      # confirm an order exists, has_order returns None, and every reply is
+      # withheld. A missing secret degrades to silence, never to a false promise.
+      STATION_SHOP_DOMAIN: ${{ secrets.STATION_SHOP_DOMAIN }}
+      STATION_ADMIN_TOKEN: ${{ secrets.STATION_ADMIN_TOKEN }}
+      STUDIO_SHOP_DOMAIN: ${{ secrets.STUDIO_SHOP_DOMAIN }}
+      STUDIO_ADMIN_TOKEN: ${{ secrets.STUDIO_ADMIN_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      OWNER_EMAIL: ${{ secrets.OWNER_EMAIL || 'itayadler99@gmail.com' }}
+      CATCHUP_DAYS: ${{ github.event.inputs.days || '7' }}
+      CATCHUP_MAX: "40"
+      CATCHUP_DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sweep both mailboxes
+        run: python route-b/catchup.py
