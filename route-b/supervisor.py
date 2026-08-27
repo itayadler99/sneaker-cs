@@ -149,13 +149,26 @@ def check_brain():
     except Exception:
         return False
 
-# ---- GitHub Actions: is the cs-bot workflow healthy / running? ----
-def check_workflow():
+# ---- GitHub Actions: are the scheduled workflows healthy / running? ----
+# Every automation that can fail silently is watched here. cs-catchup was added
+# 2026-08-27: it had never been scheduled at all, and a sweep that quietly stops
+# running looks exactly like a week with no forgotten customers.
+WATCHED = [
+    # file, label, hours without a successful run before it counts as stale
+    ("cs-bot.yml",      "מענה שוטף",  3),
+    ("cs-catchup.yml",  "סריקת נשכחים", 30),   # daily + slack for a late runner
+    # Learning is not customer-facing, so one skipped nightly run is not worth
+    # waking Itay for. 50h means "missed twice", which is a real problem.
+    ("cs-learn.yml",    "למידה",      50),
+]
+
+
+def check_workflow(wf_file="cs-bot.yml"):
     out = {"last": "", "status": "?", "age_h": None, "recent_fail": 0}
     if not GH_TOKEN:
         out["status"] = "no-token"
         return out
-    url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/cs-bot.yml/runs?per_page=10"
+    url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{wf_file}/runs?per_page=10"
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json"})
@@ -276,19 +289,24 @@ def grade(store_name, samples):
         return None
 
 def main():
-    wf = check_workflow()
     brain_ok = check_brain()
     lines = ["🛡️ מפקח שירות לקוחות — דוח מצב"]
     alerts = []
 
-    # workflow line
-    wf_icon = "✅" if wf["status"] == "success" else ("🟡" if wf["status"] in ("in_progress", "queued") else "🔴")
-    age = f"{wf['age_h']}ש' " if wf["age_h"] is not None else ""
-    lines.append(f"{wf_icon} Workflow: {wf['status']} ({age}אחרון, {wf['recent_fail']}/10 כשלים)")
-    if wf["age_h"] is not None and wf["age_h"] > STALE_HOURS:
-        alerts.append(f"⛔ ה-workflow לא רץ בהצלחה {wf['age_h']} שעות.")
-    if wf["recent_fail"] >= 5:
-        alerts.append(f"⛔ {wf['recent_fail']} מתוך 10 הריצות האחרונות נכשלו.")
+    # one line per scheduled workflow
+    for wf_file, label, stale_h in WATCHED:
+        wf = check_workflow(wf_file)
+        icon = "✅" if wf["status"] == "success" else ("🟡" if wf["status"] in ("in_progress", "queued") else "🔴")
+        age = f"{wf['age_h']}ש' " if wf["age_h"] is not None else ""
+        lines.append(f"{icon} {label}: {wf['status']} ({age}אחרון, {wf['recent_fail']}/10 כשלים)")
+        # A workflow that has never run at all is the failure that hides best:
+        # no runs means no failures, so a "0/10 כשלים" line reads as healthy.
+        if wf["status"] == "no-runs":
+            alerts.append(f"⛔ {label} ({wf_file}) לא רץ מעולם.")
+        if wf["age_h"] is not None and wf["age_h"] > (stale_h or STALE_HOURS):
+            alerts.append(f"⛔ {label} לא רץ בהצלחה {wf['age_h']} שעות.")
+        if wf["recent_fail"] >= 5:
+            alerts.append(f"⛔ {label}: {wf['recent_fail']} מתוך 10 הריצות האחרונות נכשלו.")
 
     lines.append(f"{'✅' if brain_ok else '🔴'} מוח (Anthropic): {'תקין' if brain_ok else 'לא מגיב'}")
     if not brain_ok:

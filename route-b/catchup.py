@@ -99,15 +99,25 @@ API_VER = "2024-10"
 # 2026-08-26 nothing checked that an order existed: לאה שירזי, who has never
 # bought from either store, was told her parcel was in transit and spent three
 # weeks chasing it. This is the check that was missing.
-ORDER_EXISTS_GQL = """{ orders(first: 1, query: %s) { edges { node { name } } } }"""
+ORDER_EXISTS_GQL = """{ orders(first: 5, query: %s, sortKey: CREATED_AT, reverse: true) {
+  edges { node { name createdAt displayFulfillmentStatus } } } }"""
+
+# An order that already reached the customer is not "on its way". The first dry
+# run would have told two people with FULFILLED orders that their parcel was in
+# transit: #2352 delivered on 10 July and #2501 on 9 August.
+DELIVERED = {"FULFILLED", "DELIVERED", "RESTOCKED"}
 
 
-def has_order(shop_domain, token, email_addr):
-    """True only if Shopify returns an order for this address.
+def open_order(shop_domain, token, email_addr):
+    """True if this address has an order that has NOT been delivered yet.
 
-    Returns None when we cannot ask (no credentials, API down). None is not
-    False: the caller must treat "unknown" as "do not send", never as "no order
-    so hand off quietly" - and never as permission to reassure.
+    Three-valued on purpose:
+      True  - there is an order still in flight, the holding reply is true
+      False - no order, or every order already arrived; both mean do not send
+      None  - we could not ask (no credentials, API down)
+
+    None is not False. The caller must treat "unknown" as "do not send": an
+    outage must never be the reason a customer gets told their parcel is coming.
     """
     if not shop_domain or not token or not email_addr:
         return None
@@ -121,10 +131,22 @@ def has_order(shop_domain, token, email_addr):
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             data = json.load(r).get("data") or {}
-        return bool(data.get("orders", {}).get("edges"))
+        nodes = [e["node"] for e in data.get("orders", {}).get("edges", [])]
     except Exception as e:
         log("shopify lookup failed", email_addr, repr(e))
         return None
+    return any((n.get("displayFulfillmentStatus") or "").upper() not in DELIVERED
+               for n in nodes)
+
+
+# Replies to the "we have one pair left in your size" blast. The classifier
+# reads them as shipping questions - they mention an order, a size and wanting
+# it - and the first dry run was about to answer three of them with "your order
+# is on its way". They are people trying to BUY. A holding reply loses the sale
+# and confuses someone whose previous order arrived weeks ago.
+CAMPAIGN_SUBJECT = re.compile(
+    r"(נשאר\s*לנו\s*זוג|נשארו\s*לנו|מה\s*(אתה|את)\s*חושב\s*על|"
+    r"what\s+did\s+you\s+think\s+about|confirm\s+you\s+want\s+to\s+receive)", re.I)
 
 
 def log(*a):
@@ -354,15 +376,25 @@ def run_store(store_name, user, pw, shop_domain="", admin_token=""):
                                       "subject": item["subject"], "why": why,
                                       "body": item["body"][:400]})
             continue
-        # "Where is my order" is only answerable for someone who has one.
-        found = has_order(shop_domain, admin_token, item["email"])
+        # A reply to a marketing blast is a customer trying to buy, not asking
+        # where a parcel is. Answering it with a holding template loses the sale.
+        if CAMPAIGN_SUBJECT.search(item["subject"] or ""):
+            why = "תגובה לקמפיין מלאי/ביקורת — לקוח שרוצה לקנות, לא שאלת משלוח"
+            log(f"CAMPAIGN skip -> {item['email']} | {item['subject'][:50]}")
+            result["handoff"].append({"email": item["email"], "name": item["name"],
+                                      "subject": item["subject"], "why": why,
+                                      "body": item["body"][:400]})
+            continue
+        # "Where is my order" is only answerable for someone whose order is
+        # still in flight.
+        found = open_order(shop_domain, admin_token, item["email"])
         item["has_order"] = bool(found)
         if found is not True:
-            why = ("אין הזמנה ב-Shopify לפי המייל הזה — ייתכן שרכש בחנות אחרת, "
-                   "או הזמין תחת כתובת מייל אחרת"
+            why = ("אין ב-Shopify הזמנה פתוחה למייל הזה — או שלא רכש אצלנו, או "
+                   "שכל ההזמנות שלו כבר סופקו, או שהזמין תחת מייל אחר"
                    if found is False else
                    "לא הצלחתי לבדוק מול Shopify (אין טוקן או שהקריאה נכשלה)")
-            log(f"NO-ORDER skip -> {item['email']} | {why}")
+            log(f"NO-OPEN-ORDER skip -> {item['email']} | {why}")
             result["handoff"].append({"email": item["email"], "name": item["name"],
                                       "subject": item["subject"], "why": why,
                                       "body": item["body"][:400]})
