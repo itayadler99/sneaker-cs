@@ -7,7 +7,7 @@
 #
 # Runs headless in GitHub Actions on its own cron. Authorized owner automation.
 
-import imaplib, smtplib, email, json, os, re, time
+import imaplib, smtplib, email, json, os, re, subprocess, sys, time
 import urllib.request, urllib.parse
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -288,6 +288,29 @@ def grade(store_name, samples):
         log("grade warn", repr(e))
         return None
 
+def check_guards():
+    """Run the outbound-guard regression tests and report, don't block.
+
+    Added 2026-09-10 with the authenticity gate. The few-shot bank in kb/ is
+    regenerated daily from the mailbox, and the humans DO answer "are these
+    original?" — so the rule needs a watchdog, not a one-time cleanup. Lives here
+    and not in the workflow file because the deploy token has no `workflow` scope.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = []
+    for t in ("test_authenticity_guard.py", "test_order_claim_guard.py"):
+        path = os.path.join(here, t)
+        if not os.path.exists(path):
+            out.append((t, None, "missing"))
+            continue
+        try:
+            r = subprocess.run([sys.executable, path], capture_output=True, text=True, timeout=120)
+            out.append((t, r.returncode == 0, (r.stdout + r.stderr).strip()[-300:]))
+        except Exception as e:
+            out.append((t, False, repr(e)[:200]))
+    return out
+
+
 def main():
     brain_ok = check_brain()
     lines = ["🛡️ מפקח שירות לקוחות — דוח מצב"]
@@ -307,6 +330,16 @@ def main():
             alerts.append(f"⛔ {label} לא רץ בהצלחה {wf['age_h']} שעות.")
         if wf["recent_fail"] >= 5:
             alerts.append(f"⛔ {label}: {wf['recent_fail']} מתוך 10 הריצות האחרונות נכשלו.")
+
+    for name, ok, detail in check_guards():
+        if ok is None:
+            lines.append(f"🔴 שומר {name}: הקובץ חסר")
+            alerts.append(f"⛔ קובץ הבדיקה {name} נעלם מהריפו. השומר לא מאומת.")
+        elif ok:
+            lines.append(f"✅ שומר {name}: עובר")
+        else:
+            lines.append(f"🔴 שומר {name}: נכשל")
+            alerts.append(f"⛔ {name} נכשל. ייתכן שבנק הדוגמאות למד מחדש תשובה אסורה. פירוט: {detail}")
 
     lines.append(f"{'✅' if brain_ok else '🔴'} מוח (Anthropic): {'תקין' if brain_ok else 'לא מגיב'}")
     if not brain_ok:

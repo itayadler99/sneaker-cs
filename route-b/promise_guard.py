@@ -27,6 +27,32 @@ OUTGOING_BAN = re.compile(
     re.I)
 
 
+# ---- AUTHENTICITY (added 2026-09-10, explicit owner instruction) ----
+# Itay, verbatim: "אסור להגיד 'מוצרים מקוריים' בלבד. לא לנקוב ולא להתקרב לנושא הזה בכלל.
+# אם אנשים שואלים, אתה מעביר לי את זה, אבל אתה לא אומר בחיים 'מוצרים מקוריים', בחיים."
+#
+# Why a hard gate and not a prompt line: kb/learned-studio.md carried 26 copies of the
+# human reply "כן, כל הנעליים אצלנו במלאי הן מקוריות 100%", and the prompt tells the model
+# to imitate the FACTS in those examples. kb/learned-station.md line 418 is a customer
+# threatening to sue over exactly that sentence. A prompt instruction loses to 26 examples.
+# This gate reads the BOT's outgoing text and blocks the send outright.
+AUTHENTICITY_BAN = re.compile(
+    r"(מקורי|מקוריים|מקורית|מקוריות|לא\s*מקורי|אורגינל|"
+    r"זיוף|מזויף|מזויפות|חיקוי|העתק\s*(1:1|מדויק)|רפליק|"
+    r"authentic|genuine|original\s*(product|shoes|pair)|100%\s*original|replica|counterfeit|fake)",
+    re.I)
+
+
+def authenticity_violation(text):
+    """Return the authenticity wording the outgoing text uses, or None.
+
+    The bot never answers whether the goods are original — in either direction.
+    Any hit escalates to Itay instead of being sent.
+    """
+    m = AUTHENTICITY_BAN.search(text or "")
+    return m.group(0) if m else None
+
+
 def violation(text):
     """Return the banned phrase the outgoing text promises, or None.
 
@@ -34,4 +60,7 @@ def violation(text):
     There is no confidence score high enough to bypass this.
     """
     m = OUTGOING_BAN.search(text or "")
-    return m.group(0) if m else None
+    if m:
+        return m.group(0)
+    # Same gate, same consequence: block the send and hand it to Itay.
+    return authenticity_violation(text)

@@ -201,6 +201,38 @@ def distill(pairs):
         resp = json.load(r)
     return "".join(b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text").strip()
 
+AUTHENTICITY = re.compile(
+    r"(מקורי|מקוריים|מקורית|מקוריות|אורגינל|זיוף|מזויף|מזויפות|חיקוי|רפליק|"
+    r"authentic|genuine|replica|counterfeit)", re.I)
+
+
+def scrub_authenticity(text):
+    """Strip anything that teaches the bot to answer 'are these original?'.
+
+    2026-09-10, Itay verbatim: "לא לנקוב ולא להתקרב לנושא הזה בכלל."
+    This file regenerates the few-shot bank DAILY from real human replies, and the
+    humans do answer that question — kb/learned-studio.md had 26 copies of
+    "כן, כל הנעליים אצלנו במלאי הן מקוריות 100%". Cleaning the file once is useless
+    without this: tomorrow's run would learn it straight back from the mailbox.
+
+    Drops whole '### דוגמה' blocks that touch the topic, and any bullet line that
+    mentions it, then leaves a marker so the next reader knows why.
+    """
+    parts = text.split("### דוגמה")
+    head, examples = parts[0], parts[1:]
+    kept = [b for b in examples if not AUTHENTICITY.search(b)]
+    dropped_examples = len(examples) - len(kept)
+    head_lines = [ln for ln in head.split("\n")
+                  if not (ln.lstrip().startswith(("-", "*")) and AUTHENTICITY.search(ln))]
+    dropped_lines = len(head.split("\n")) - len(head_lines)
+    out = "\n".join(head_lines) + "".join("### דוגמה" + b for b in kept)
+    if dropped_examples or dropped_lines:
+        out += ("\n\n> ⛔ הוסרו אוטומטית " + str(dropped_examples) + " דוגמאות ו-"
+                + str(dropped_lines) + " שורות שנגעו בשאלת מקוריות המוצר."
+                " הבוט לא עונה על זה — הפנייה עוברת לאיתי. ראה promise_guard.authenticity_violation.\n")
+    return out
+
+
 def trim_examples(text):
     """Keep the most recent MAX_EXAMPLES '### דוגמה' blocks to bound file size."""
     blocks = text.split("### דוגמה")
@@ -231,6 +263,7 @@ def main():
         prev = re.sub(r"^# דוגמאות נלמדות.*?\n", "", prev, flags=re.S | re.M) if prev.startswith("#") else prev
     body = f"{header}\n## עדכון {stamp} ({len(pairs)} תשובות)\n\n{insight}\n\n{prev}".strip()
     body = trim_examples(body)
+    body = scrub_authenticity(body)
     with open(LEARNED_PATH, "w", encoding="utf-8") as f:
         f.write(body + "\n")
     log(f"wrote {LEARNED_PATH} ({len(body)} chars)")
