@@ -12,6 +12,7 @@
 # is escalated to the owner via Telegram and left UNREAD for manual handling.
 
 import imaplib, smtplib, email, json, os, re, sys, time, hashlib
+import subprocess
 import socket
 import urllib.request, urllib.parse
 
@@ -43,6 +44,7 @@ else:
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 MODEL = env("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+CLI_MODEL = env("CLI_MODEL", "sonnet")   # brain fallback: the `claude` CLI (Max sub)
 API_VER = "2024-10"
 MAX_PER_RUN = int(env("MAX_PER_RUN", "6"))
 MIN_CONF = float(env("MIN_CONF", "0.80"))
@@ -345,6 +347,21 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 {message}
 """
 
+def brain_via_cli(prompt):
+    """Fallback brain: the `claude` CLI, billed to the Max subscription.
+
+    ANTHROPIC_API_KEY is stripped from the child environment on purpose - with
+    it set the CLI bills the same empty API account that just refused us."""
+    child_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    out = subprocess.run(
+        ["claude", "-p", "--output-format", "text", "--model", CLI_MODEL,
+         "--dangerously-skip-permissions"],
+        input=prompt, capture_output=True, text=True, timeout=240,
+        env=child_env, cwd="/tmp",
+    )
+    return (out.stdout or "").strip()
+
+
 def ask_brain(sender_name, sender_email, subject, message, orders=None):
     # orders is passed in by main() so the same lookup result decides both what
     # the model sees and whether order_claim_guard lets the reply out. Looking
@@ -371,6 +388,7 @@ def ask_brain(sender_name, sender_email, subject, message, orders=None):
             "content-type": "application/json",
         },
     )
+    raw = ""
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             resp = json.load(r)
@@ -378,9 +396,26 @@ def ask_brain(sender_name, sender_email, subject, message, orders=None):
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:200]
         log("anthropic HTTPError", e.code, detail)
-        return {"action": "escalate", "reason": f"api {e.code}"}
+        why = f"api {e.code}"
     except Exception as e:
-        return {"action": "escalate", "reason": f"api error {e!r}"}
+        why = f"api error {e!r}"
+    else:
+        why = ""
+    if why:
+        # The API is not the only brain we own. On 2026-09-02 the API credit
+        # balance hit zero, every customer mail escalated for two weeks, and
+        # nobody got an answer. The `claude` CLI on the Mac runs on the Max
+        # subscription and costs nothing per call, so it takes over whenever the
+        # API refuses. In GitHub Actions the CLI does not exist, the call raises,
+        # and we escalate exactly as before.
+        try:
+            raw = brain_via_cli(prompt)
+            log("brain fallback -> claude CLI after", why)
+        except Exception as e:
+            log("brain fallback failed", repr(e))
+            return {"action": "escalate", "reason": why}
+    if not raw:
+        return {"action": "escalate", "reason": why or "empty brain reply"}
     m = re.search(r"\{.*\}", raw, re.S)
     if not m:
         return {"action": "escalate", "reason": "no json from brain"}
