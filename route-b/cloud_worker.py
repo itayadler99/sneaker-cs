@@ -351,6 +351,12 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 
 def alert_brain_down(n):
     """One incident alert, not one per message and not one per five minutes."""
+    # In GitHub Actions the filesystem is thrown away after every run, so the
+    # rate limit below cannot hold and this would fire every five minutes - the
+    # exact alert-flood that made the last outage invisible. The Mac's sentinel
+    # owns alerting; the cloud just works quietly and leaves the mail for later.
+    if env("GITHUB_ACTIONS"):
+        return
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brain_state.json")
     try:
         st = json.load(open(path, encoding="utf-8"))
