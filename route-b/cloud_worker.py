@@ -45,7 +45,9 @@ else:
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 MODEL = env("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 CLI_MODEL = env("CLI_MODEL", "sonnet")   # brain fallback: the `claude` CLI (Max sub)
-OPENAI_API_KEY = env("OPENAI_API_KEY")   # brain fallback #3, for the cloud (no CLI there)
+GATEWAY_KEY = env("AI_GATEWAY_API_KEY")  # brain fallback #3: Vercel AI Gateway
+GATEWAY_MODEL = env("AI_GATEWAY_MODEL", "anthropic/claude-sonnet-4.5")
+OPENAI_API_KEY = env("OPENAI_API_KEY")   # brain fallback #4, for the cloud (no CLI there)
 OPENAI_MODEL = env("OPENAI_MODEL", "gpt-4.1")
 API_VER = "2024-10"
 MAX_PER_RUN = int(env("MAX_PER_RUN", "6"))
@@ -407,6 +409,31 @@ def brain_via_cli(prompt):
     return (out.stdout or "").strip()
 
 
+def brain_via_gateway(prompt):
+    """Vercel AI Gateway - the cloud's own brain, billed to the Vercel account.
+
+    GitHub Actions has no `claude` CLI and no subscription, so without this the
+    cloud can only work while the Anthropic account has credit. The gateway
+    speaks the OpenAI chat shape and reaches Claude through the same Vercel bill
+    that already pays for the cron that triggers these runs. On the free tier it
+    answers a handful of requests and then returns 429, so it only carries real
+    traffic once credits are topped up - until then it fails over like any other
+    dead provider."""
+    if not GATEWAY_KEY:
+        raise RuntimeError("no AI_GATEWAY_API_KEY")
+    body = json.dumps({
+        "model": GATEWAY_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1024,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://ai-gateway.vercel.sh/v1/chat/completions", data=body, method="POST",
+        headers={"Authorization": f"Bearer {GATEWAY_KEY}", "content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        d = json.load(r)
+    return (d["choices"][0]["message"]["content"] or "").strip()
+
+
 def brain_via_openai(prompt):
     """Last-resort brain. The CLI only exists on the Mac, so in GitHub Actions
     this is what keeps customers answered when the Anthropic API is down."""
@@ -480,7 +507,8 @@ def ask_brain_prompt(prompt):
         # subscription and costs nothing per call, so it takes over whenever the
         # API refuses. In GitHub Actions the CLI does not exist, the call raises,
         # and we escalate exactly as before.
-        for name, fn in (("claude CLI", brain_via_cli), ("openai", brain_via_openai)):
+        for name, fn in (("claude CLI", brain_via_cli), ("vercel gateway", brain_via_gateway),
+                         ("openai", brain_via_openai)):
             try:
                 raw = fn(prompt)
                 if raw:

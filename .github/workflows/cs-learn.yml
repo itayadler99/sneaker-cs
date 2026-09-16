@@ -21,6 +21,10 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+      # The cloud's own brain. GitHub Actions has no claude CLI, so when the
+      # Anthropic balance runs out this is what keeps customers answered.
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+      AI_GATEWAY_MODEL: ${{ secrets.AI_GATEWAY_MODEL }}
       STORE_GMAIL_USER: ${{ secrets.STORE_GMAIL_USER }}
       STORE_GMAIL_APP_PASSWORD: ${{ secrets.STORE_GMAIL_APP_PASSWORD }}
       STUDIO_GMAIL_USER: ${{ secrets.STUDIO_GMAIL_USER }}
