@@ -406,8 +406,11 @@ def main():
     log(digest)
     if alerts:
         body = "🚨 התראת מפקח:\n" + "\n".join(alerts) + "\n\n" + digest
+        # No mail. Itay's inbox is for customers who wrote in, not for status
+        # reports about the bot - this digest went out every 4 hours for two
+        # weeks and taught him to ignore the folder. Machine problems reach him
+        # through the sentinel's WhatsApp message instead.
         tg(body)
-        mail_owner(f"[שירות לקוחות] {len(alerts)} בעיות דורשות טיפול", body)
     else:
         tg(digest)
     print("DONE supervisor alerts=%d" % len(alerts))

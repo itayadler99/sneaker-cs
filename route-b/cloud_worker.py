@@ -133,6 +133,29 @@ def tg(msg):
 
 OWNER_EMAIL = env("OWNER_EMAIL", "itayadler99@gmail.com")
 
+# Itay's inbox is for one thing only: a real customer wrote in and needs him.
+# Not order notifications, not newsletters, not platform mail, not status
+# digests about the bot itself. 2026-09-16, in his words: "רק לפניות אימייל של
+# לקוחות. השאר לא מעניין אותנו."
+NOT_A_CUSTOMER = re.compile(
+    r"(no-?reply|do-?not-?reply|mailer-daemon|postmaster|notifications?@|"
+    r"shopify|facebook|instagram|google|paypal|klaviyo|judge\.?me|mailchimp|"
+    r"linkedin|twitter|tiktok|github|stripe|payplus|cardcom|brevo|omnisend|"
+    r"myprotein|hellorep|zipify|winninghunter|kaching|loox|apple\.com|"
+    r"dondymarketing|sendgrid|hubspot|intercom|welcome@|billing@|invoice|"
+    r"marketing@|newsletter|@t\.|@e\.|@n\.|@email\.)", re.I)
+
+NOT_AN_INQUIRY = re.compile(
+    r"(order\s+#?\d+\s+placed|הזמנה\s+#?\d+\s+בוצעה|new order|"
+    r"אישור הזמנה שלך התקבל|payment received)", re.I)
+
+
+def is_customer_inquiry(sender_email, subject):
+    """True only for mail a human customer actually wrote to us."""
+    return not (NOT_A_CUSTOMER.search(sender_email or "")
+                or NOT_AN_INQUIRY.search(subject or ""))
+
+
 def mail_owner(subject, body):
     """Itay does not read Telegram. Anything he must actually see goes to his
     inbox as well (feedback_itay_never_reads_telegram)."""
@@ -151,6 +174,22 @@ def mail_owner(subject, body):
         log("emailed owner")
     except Exception as e:
         log("owner-mail warn", repr(e))
+
+def mail_customer_handoff(sender_name, sender_email, subject, body, why, draft=""):
+    """The only mail the bot is allowed to send Itay: a customer needs you.
+
+    Subject leads with the person and the order so the inbox is a work queue,
+    not a feed."""
+    if not is_customer_inquiry(sender_email, subject):
+        log(f"handoff suppressed (not a customer): {sender_email} | {subject[:40]}")
+        return
+    mail_owner(
+        f"[{STORE_NAME}] לקוח מחכה לך: {sender_name or sender_email} — {subject[:60]}",
+        f"מי: {sender_name} <{sender_email}>\n"
+        f"למה זה אצלך: {why}\n\n"
+        f"--- מה שהלקוח כתב ---\n{body[:1500]}\n"
+        + (f"\n--- טיוטה שהבוט הכין (לא נשלחה) ---\n{draft}\n" if draft else ""))
+
 
 def msg_labels(imap, num):
     """Gmail labels on a message (used as durable processed-state in the cloud)."""
@@ -375,8 +414,9 @@ def alert_brain_down(n):
     msg = (f"🔴 {STORE_NAME}: אף מוח לא זמין (API + CLI + OpenAI כולם נפלו). "
            f"{n} פניות לקוח ממתינות ולא סומנו כטופלו - הן ייענו אוטומטית ברגע שמוח יחזור. "
            f"אין צורך לענות ידנית.")
+    # No mail here: this is a machine problem, and the machine's alarm is the
+    # sentinel's WhatsApp message. Itay's inbox stays customers-only.
     tg(msg)
-    mail_owner(f"🔴 {STORE_NAME}: הבוט בלי מוח", msg)
 
 
 def note_brain_down(why):
@@ -663,23 +703,14 @@ def main():
                    if kind == "action-done" else
                    "הבוט דיבר על מצב ההזמנה, אבל לא נמצאה שום הזמנה של הלקוח הזה ב-Shopify")
             log(f"BLOCKED-CLAIM {sender_email} | {kind} | \"{phrase}\" | orders={len(orders)}")
-            mail_owner(
-                f"🚩 {STORE_NAME}: הבוט ניסה לטעון \"{phrase}\" — נחסם",
-                f"סוג החסימה: {kind}\n{why}\n\n"
-                f"לקוח: {sender_name} <{sender_email}>\n"
-                f"נושא: {subject}\n"
-                f"הזמנות שנמצאו ב-Shopify: {len(orders)}\n\n"
-                f"--- פניית הלקוח ---\n{body[:1200]}\n\n"
-                f"--- מה שהבוט רצה לשלוח (לא נשלח, יושב כטיוטה) ---\n{res.get('reply','')}\n")
+            mail_customer_handoff(sender_name, sender_email, subject, body,
+                                  f"הבוט עמד לכתוב משהו לא נכון ({why}) ונחסם, אז אף אחד עוד לא ענה ללקוח",
+                                  res.get("reply", ""))
         if promised:
             log(f"BLOCKED-PROMISE {sender_email} | \"{promised}\" | conf={conf}")
-            mail_owner(
-                f"🚩 {STORE_NAME}: הבוט ניסה להציע ללקוח \"{promised}\" — נחסם",
-                f"לקוח: {sender_name} <{sender_email}>\n"
-                f"נושא: {subject}\n"
-                f"הביטוי שנחסם: {promised}\n\n"
-                f"--- פניית הלקוח ---\n{body[:1200]}\n\n"
-                f"--- מה שהבוט רצה לשלוח (לא נשלח, יושב כטיוטה) ---\n{res.get('reply','')}\n")
+            mail_customer_handoff(sender_name, sender_email, subject, body,
+                                  f"הבוט עמד להבטיח \"{promised}\" ונחסם, אז אף אחד עוד לא ענה ללקוח",
+                                  res.get("reply", ""))
 
         if can_send:
             try:
@@ -721,11 +752,15 @@ def main():
             why = (f"🚩 הבוט ניסה להבטיח \"{promised}\" — נחסם" if promised
                    else "רגיש" if sensitive else res.get("reason", f"conf={conf}"))
             log(f"ESCAL {sender_email} | {subject[:40]} | {why}")
-            tg(f"📥 {STORE_NAME} — פנייה הושארה לך (לא נשלח, טיוטה ב-Gmail)\n"
-               f"מ: {sender_name} <{sender_email}>\n"
-               f"נושא: {subject}\n"
-               f"סיבה: {why}"
-               + (f"\n\nטיוטה מוצעת:\n{res['reply']}" if res.get("reply") else ""))
+            # Mail and ping only when a person actually wrote to us. Platform
+            # mail and newsletters land in the log and nowhere else.
+            if is_customer_inquiry(sender_email, subject):
+                mail_customer_handoff(sender_name, sender_email, subject, body, why,
+                                      res.get("reply", ""))
+                tg(f"📥 {STORE_NAME} — פנייה של לקוח מחכה לך\n"
+                   f"מ: {sender_name} <{sender_email}>\n"
+                   f"נושא: {subject}\n"
+                   f"סיבה: {why}")
         mark_done(M, num)   # durable: never re-bill the brain on this message again
     M.logout()
     if brain_down:

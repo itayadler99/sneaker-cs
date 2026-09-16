@@ -450,6 +450,10 @@ def owner_report(results, user, pw):
         lines.append("")
     body = "\n".join(lines)
     print(body)
+    # The daily sweep report is a machine report, not a customer. It stays in
+    # the log; only a real customer inquiry earns a place in Itay's inbox.
+    if os.environ.get("CATCHUP_MAIL_REPORT", "0") != "1":
+        return
     if not user or not pw or not OWNER_EMAIL:
         return
     try:

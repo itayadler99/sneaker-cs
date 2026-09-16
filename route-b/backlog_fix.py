@@ -136,7 +136,8 @@ def digest(rows):
     listed here for Itay to push, next to the customers the bot refused to touch
     at all."""
     push = [r for r in rows if r["verdict"] == "SENT" and r["late"]]
-    yours = [r for r in rows if r["verdict"].startswith("ESCALATE")]
+    yours = [r for r in rows if r["verdict"].startswith("ESCALATE")
+             and cw.is_customer_inquiry(r["to"], r["subject"])]
     if not push and not yours:
         return
     lines = []
