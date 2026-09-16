@@ -1,0 +1,28 @@
+name: sneaker-cs self test
+
+# The only check that asks the customer's question: if someone writes in right
+# now, does an answer come back? Runs in the cloud so it keeps watching while
+# the Mac is closed.
+on:
+  schedule:
+    - cron: "0 7,15 * * *"     # 10:00 and 18:00 Israel
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      STORE_GMAIL_USER: ${{ secrets.STORE_GMAIL_USER }}
+      STORE_GMAIL_APP_PASSWORD: ${{ secrets.STORE_GMAIL_APP_PASSWORD }}
+      STUDIO_GMAIL_USER: ${{ secrets.STUDIO_GMAIL_USER }}
+      STUDIO_GMAIL_APP_PASSWORD: ${{ secrets.STUDIO_GMAIL_APP_PASSWORD }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SELFTEST_WAIT_MIN: "25"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python route-b/selftest.py

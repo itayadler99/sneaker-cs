@@ -11,7 +11,7 @@
 # WhatsApp if it never does. Both the probe and the reply are moved to Trash
 # afterwards, so the mailboxes stay clean.
 
-import email, imaplib, json, os, smtplib, sys, time, urllib.request, uuid
+import email, imaplib, json, os, smtplib, sys, time, urllib.parse, urllib.request, uuid
 from email.message import EmailMessage
 from datetime import datetime
 
@@ -26,14 +26,31 @@ def env(k, d=""):
 
 
 def wa(msg):
+    """WhatsApp through the local bridge; Telegram when there is no bridge.
+
+    The same file runs on the Mac and in GitHub Actions. In the cloud there is
+    no bridge to talk to, and an alarm that can only fire on a machine that may
+    be switched off is not an alarm."""
     body = json.dumps({"recipient": WA_TO, "message": msg}).encode("utf-8")
     req = urllib.request.Request("http://localhost:8080/api/send", data=body,
                                  method="POST", headers={"content-type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            return r.status == 200
+            if r.status == 200:
+                return True
     except Exception as e:
-        print("wa failed", repr(e)); return False
+        print("wa bridge unavailable", repr(e))
+    tok, chat = env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID")
+    if not tok or not chat:
+        return False
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            f"https://api.telegram.org/bot{tok}/sendMessage",
+            data=urllib.parse.urlencode({"chat_id": chat, "text": msg}).encode(),
+            method="POST"), timeout=20)
+        return True
+    except Exception as e:
+        print("telegram failed", repr(e)); return False
 
 
 def trash(user, pw, token):
