@@ -126,7 +126,7 @@ def unanswered_counts(days=3):
         if not u or not p:
             continue
         try:
-            res[name] = answer_rate(u, p, days)["unanswered"]
+            res[name] = answer_rate(u, p, days, skip_label="cs-bot-seen")["unanswered"]
         except Exception as e:
             print(name, "answer_rate failed", repr(e))
     return res

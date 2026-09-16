@@ -74,13 +74,29 @@ def _scan(M, box, since, fields):
     return out
 
 
-def answer_rate(user, pw, days=30):
-    """Facts about whether real customers were answered, and by whom."""
+def answer_rate(user, pw, days=30, skip_label=""):
+    """Facts about whether real customers were answered, and by whom.
+
+    skip_label drops threads the bot has already routed to Itay on purpose
+    (refunds, size swaps, wrong items). Those are unanswered by design and
+    counting them keeps an alarm permanently red, which is how the last outage
+    hid in plain sight."""
     since = (datetime.utcnow() - timedelta(days=days)).strftime("%d-%b-%Y")
     me = user.lower()
     M = imaplib.IMAP4_SSL("imap.gmail.com")
     M.login(user, pw)
+    labelled = set()
     try:
+        if skip_label:
+            M.select("INBOX", readonly=True)
+            typ, data = M.search(None, f"(SINCE {since})", "X-GM-LABELS", f'"{skip_label}"')
+            for batch in _chunks(data[0].split() if typ == "OK" and data and data[0] else [], 100):
+                typ, md = M.fetch(b",".join(batch).decode(), "(X-GM-THRID)")
+                for item in (md or []):
+                    raw = item if isinstance(item, bytes) else item[0]
+                    m = THRID.search(raw or b"")
+                    if m:
+                        labelled.add(m.group(1).decode())
         inbox = _scan(M, "INBOX", since, ["From", "Subject", "Date"])
         sent = _scan(M, SENT_BOX, since, ["Subject", "Date", BOT_HEADER])
     finally:
@@ -103,7 +119,8 @@ def answer_rate(user, pw, days=30):
     for thrid, hdr in sent:
         (by_bot if hdr.get(BOT_HEADER) else by_human).add(thrid)
 
-    unanswered = [t for t in customers if t not in by_bot and t not in by_human]
+    unanswered = [t for t in customers
+                  if t not in by_bot and t not in by_human and t not in labelled]
     total = len(customers)
     return {
         "days": days,

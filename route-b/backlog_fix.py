@@ -112,6 +112,22 @@ def build_prompt(sender_name, sender_email, subject, body, orders, facts, waited
         message=body + "\n\n" + RULES.format(facts=f))
 
 
+def label_escalated(M, sender_email, since):
+    """Mark a customer we deliberately handed to Itay as processed.
+
+    Without this they stay in the "nobody answered them" count for ever and the
+    sentinel alarms every day about threads that are waiting for Itay on
+    purpose - a red light that means nothing is the light we already ignored."""
+    try:
+        M.select("INBOX")
+        typ, d = M.search(None, f"(SINCE {since})", "FROM", sender_email)
+        ids = d[0].split() if typ == "OK" and d and d[0] else []
+        if ids:
+            M.store(b",".join(ids).decode(), "+X-GM-LABELS", "cs-bot-seen")
+    except Exception as e:
+        print("label warn", repr(e))
+
+
 def digest(rows):
     """Close the loop honestly.
 
@@ -222,6 +238,7 @@ def main():
         if any(m["sensitive"] for m in msgs) or not facts:
             row["verdict"] = ("ESCALATE-sensitive" if any(m["sensitive"] for m in msgs)
                               else "ESCALATE-no-order")
+            label_escalated(M, sender_email, since)
             rows.append(row); continue
 
         res = cw.ask_brain_prompt(build_prompt(newest["name"], sender_email,
@@ -230,6 +247,7 @@ def main():
         reply = res.get("reply", "")
         if res.get("action") != "draft" or not reply:
             row["verdict"] = "ESCALATE-brain:" + str(res.get("reason", ""))[:70]
+            label_escalated(M, sender_email, since)
             rows.append(row); continue
         if cw.outgoing_violation(reply) or cw.order_claim_violation(reply, bool(orders)):
             row["verdict"] = "ESCALATE-guard"; rows.append(row); continue
