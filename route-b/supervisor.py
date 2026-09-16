@@ -341,9 +341,14 @@ def main():
             lines.append(f"🔴 שומר {name}: נכשל")
             alerts.append(f"⛔ {name} נכשל. ייתכן שבנק הדוגמאות למד מחדש תשובה אסורה. פירוט: {detail}")
 
-    lines.append(f"{'✅' if brain_ok else '🔴'} מוח (Anthropic): {'תקין' if brain_ok else 'לא מגיב'}")
-    if not brain_ok:
-        alerts.append("⛔ ה-API של המוח לא מגיב. הבוט לא יכול לענות.")
+    # The API is one brain out of three (API, the claude CLI on the Mac, OpenAI).
+    # It going down is a status line, not an incident: between 2026-09-02 and
+    # 2026-09-16 this alert fired ~84 times into an inbox nobody was reading,
+    # which is the same as not alerting at all. The incident worth waking Itay
+    # for is "customers were not answered" - that alert lives below, and the
+    # local sentinel raises it on WhatsApp.
+    lines.append(f"{'✅' if brain_ok else '🟡'} מוח (Anthropic API): "
+                 f"{'תקין' if brain_ok else 'לא מגיב — גיבוי CLI/OpenAI אמור לכסות'}")
 
     for key, cfg in STORES.items():
         if not cfg["user"] or not cfg["pw"]:

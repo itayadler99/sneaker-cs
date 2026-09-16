@@ -6,3 +6,6 @@ route-b/processed.json
 route-b/starve_test_state.json
 route-b/.watchdog_last_alert
 route-b/*.log
+route-b/brain_state.json
+route-b/sentinel_state.json
+route-b/backlog_*.json

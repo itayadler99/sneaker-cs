@@ -26,7 +26,13 @@ SENT_BOX = "[Gmail]/Sent Mail"
 IGNORE_SENDER = re.compile(
     r"(no-?reply|do-?not-?reply|mailer-daemon|postmaster|notifications?@|"
     r"shopify|facebook|instagram|google|paypal|klaviyo|judge\.?me|mailchimp|"
-    r"linkedin|twitter|tiktok|github|stripe|payplus|cardcom)", re.I)
+    r"linkedin|twitter|tiktok|github|stripe|payplus|cardcom|"
+    # SaaS and marketing blasts. Without these the "customers with no answer"
+    # count is mostly newsletters, and an alarm that cries wolf daily is the
+    # same as no alarm - which is how a two-week outage stayed invisible.
+    r"myprotein|hellorep|zipify|winninghunter|kaching|loox|apple\.com|"
+    r"dondymarketing|sendgrid|hubspot|intercom|mailer@|marketing@|"
+    r"newsletter|@email\.|@e\.|@n\.)", re.I)
 
 THRID = re.compile(rb"X-GM-THRID\s+(\d+)")
 

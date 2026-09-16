@@ -45,6 +45,8 @@ else:
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 MODEL = env("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 CLI_MODEL = env("CLI_MODEL", "sonnet")   # brain fallback: the `claude` CLI (Max sub)
+OPENAI_API_KEY = env("OPENAI_API_KEY")   # brain fallback #3, for the cloud (no CLI there)
+OPENAI_MODEL = env("OPENAI_MODEL", "gpt-4.1")
 API_VER = "2024-10"
 MAX_PER_RUN = int(env("MAX_PER_RUN", "6"))
 MIN_CONF = float(env("MIN_CONF", "0.80"))
@@ -347,6 +349,43 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 {message}
 """
 
+def alert_brain_down(n):
+    """One incident alert, not one per message and not one per five minutes."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brain_state.json")
+    try:
+        st = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        st = {}
+    last = (st.get(STORE) or {}).get("alerted_at", 0)
+    if time.time() - float(last or 0) < 6 * 3600:
+        return
+    st.setdefault(STORE, {})["alerted_at"] = time.time()
+    try:
+        json.dump(st, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    msg = (f"🔴 {STORE_NAME}: אף מוח לא זמין (API + CLI + OpenAI כולם נפלו). "
+           f"{n} פניות לקוח ממתינות ולא סומנו כטופלו - הן ייענו אוטומטית ברגע שמוח יחזור. "
+           f"אין צורך לענות ידנית.")
+    tg(msg)
+    mail_owner(f"🔴 {STORE_NAME}: הבוט בלי מוח", msg)
+
+
+def note_brain_down(why):
+    """Record that the whole brain chain refused. The sentinel reads this file:
+    a single failing provider is not an incident, zero working providers is."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brain_state.json")
+    try:
+        st = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        st = {}
+    st[STORE] = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "why": why}
+    try:
+        json.dump(st, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def brain_via_cli(prompt):
     """Fallback brain: the `claude` CLI, billed to the Max subscription.
 
@@ -362,6 +401,25 @@ def brain_via_cli(prompt):
     return (out.stdout or "").strip()
 
 
+def brain_via_openai(prompt):
+    """Last-resort brain. The CLI only exists on the Mac, so in GitHub Actions
+    this is what keeps customers answered when the Anthropic API is down."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("no OPENAI_API_KEY")
+    body = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1024,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions", data=body, method="POST",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
+                 "content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        d = json.load(r)
+    return (d["choices"][0]["message"]["content"] or "").strip()
+
+
 def ask_brain(sender_name, sender_email, subject, message, orders=None):
     # orders is passed in by main() so the same lookup result decides both what
     # the model sees and whether order_claim_guard lets the reply out. Looking
@@ -375,6 +433,14 @@ def ask_brain(sender_name, sender_email, subject, message, orders=None):
         sender_name=sender_name, sender_email=sender_email,
         subject=subject, message=message,
     )
+    return ask_brain_prompt(prompt)
+
+
+def ask_brain_prompt(prompt):
+    """Run one already-built prompt through the brain chain: API, then CLI.
+
+    Split out of ask_brain so the backlog tool can hand over a prompt carrying
+    its own extra rules without rebuilding the template by hand."""
     payload = json.dumps({
         "model": MODEL,
         "max_tokens": 1024,
@@ -408,12 +474,20 @@ def ask_brain(sender_name, sender_email, subject, message, orders=None):
         # subscription and costs nothing per call, so it takes over whenever the
         # API refuses. In GitHub Actions the CLI does not exist, the call raises,
         # and we escalate exactly as before.
-        try:
-            raw = brain_via_cli(prompt)
-            log("brain fallback -> claude CLI after", why)
-        except Exception as e:
-            log("brain fallback failed", repr(e))
-            return {"action": "escalate", "reason": why}
+        for name, fn in (("claude CLI", brain_via_cli), ("openai", brain_via_openai)):
+            try:
+                raw = fn(prompt)
+                if raw:
+                    log(f"brain fallback -> {name} after", why)
+                    break
+            except Exception as e:
+                log(f"brain fallback {name} failed", repr(e))
+        else:
+            note_brain_down(why)
+            # brain_down is not "this message is hard", it is "we have no brain".
+            # main() must leave the mail untouched so it is answered for real
+            # once a provider comes back, instead of being marked handled.
+            return {"action": "escalate", "reason": why, "brain_down": True}
     if not raw:
         return {"action": "escalate", "reason": why or "empty brain reply"}
     m = re.search(r"\{.*\}", raw, re.S)
@@ -502,7 +576,7 @@ def main():
         ids = data[0].split() if data and data[0] else []
         ids = [n for n in ids if DONE_LABEL not in msg_labels(M, n)]
     log(f"todo={len(ids)} cap={MAX_PER_RUN} send={ENABLE_SEND}")
-    sent = escalated = skipped = 0
+    sent = escalated = skipped = brain_down = 0
     for num in reversed(ids):
         if sent + escalated >= MAX_PER_RUN:
             break
@@ -529,6 +603,15 @@ def main():
 
         orders = find_orders(sender_email, body)
         res = ask_brain(sender_name, sender_email, subject, body, orders)
+        if res.get("brain_down"):
+            # No provider answered. Leave the mail UNREAD and UNLABELLED: the
+            # next run with a working brain will pick it up and answer it. This
+            # is the invariant that 2026-09-02 broke - back then every provider
+            # failure still marked the customer as handled, so two weeks of mail
+            # was burned and only Itay's Telegram knew about it.
+            brain_down += 1
+            log(f"BRAIN-DOWN leaving untouched: {sender_email} | {subject[:40]}")
+            continue
         conf = float(res.get("confidence") or 0)
         sensitive = bool(SENSITIVE.search(subject + " " + body))
         # Read the reply we are about to send, not only the mail we received.
@@ -611,7 +694,9 @@ def main():
                + (f"\n\nטיוטה מוצעת:\n{res['reply']}" if res.get("reply") else ""))
         mark_done(M, num)   # durable: never re-bill the brain on this message again
     M.logout()
-    log(f"DONE sent={sent} escalated={escalated} skipped={skipped}")
+    if brain_down:
+        alert_brain_down(brain_down)
+    log(f"DONE sent={sent} escalated={escalated} skipped={skipped} brain_down={brain_down}")
 
 if __name__ == "__main__":
     try:
