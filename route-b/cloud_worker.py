@@ -22,6 +22,7 @@ socket.setdefaulttimeout(60)
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime, formatdate, make_msgid
+from datetime import datetime, timedelta
 
 # ---- config (env-driven so the same file serves both stores in the cloud) ----
 def env(k, d=""):
@@ -635,28 +636,63 @@ def imap_connect():
 def append_draft(imap, em):
     imap.append(DRAFTS_BOX, "(\\Draft)", imaplib.Time2Internaldate(time.time()), em.as_bytes())
 
+LOOKBACK_DAYS = int(env("LOOKBACK_DAYS", "3"))
+THRID_RE = re.compile(rb"X-GM-THRID\s+(\d+)")
+
+
+def answered_threads(imap, since):
+    """Thread ids that already got a reply from this mailbox, bot or human.
+
+    This replaces \\Seen as the "handled" signal. \\Seen is not ours: a legacy
+    Apps Script bot inside the Station Google account marks customer mail read
+    and labels it `agent-processed` without answering it, and on 2026-09-17 that
+    is what swallowed 89 messages in three days - our search asked Gmail for
+    UNSEEN mail, so those were invisible to us and the customers got nothing.
+    What a reply exists for is a fact we can check; what someone marked read is
+    not."""
+    out = set()
+    try:
+        imap.select(f'"{SENT_BOX}"', readonly=True)
+        typ, data = imap.search(None, f"(SINCE {since})")
+        ids = data[0].split() if typ == "OK" and data and data[0] else []
+        for i in range(0, len(ids), 100):
+            batch = b",".join(ids[i:i + 100]).decode()
+            typ, md = imap.fetch(batch, "(X-GM-THRID)")
+            for item in (md or []):
+                raw = item if isinstance(item, bytes) else (item[0] if item else b"")
+                m = THRID_RE.search(raw or b"")
+                if m:
+                    out.add(m.group(1).decode())
+    except Exception as e:
+        log("answered-threads warn", repr(e))
+    return out
+
+
 def main():
     if not ANTHROPIC_API_KEY:
         log("FATAL no ANTHROPIC_API_KEY"); print("DONE sent=0 escalated=0"); return
     M = imap_connect()
+    since = (datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+    already = answered_threads(M, since)
     M.select("INBOX")
-    # Server-side dedup. Asking Gmail for "unseen and not already labelled" costs
-    # one round trip; checking the label per message used to cost one fetch per
-    # unseen mail (~280/run on studio), which is what tripped the 60s socket
-    # timeout and failed the run.
+    # Recent mail we have not handled ourselves. Deliberately NOT filtered by
+    # UNSEEN: read/unread belongs to whoever touched the mailbox last, and in
+    # Station's mailbox that is a legacy Apps Script bot that reads mail without
+    # answering it. Our own label is the only "handled" mark we trust, and a
+    # thread that already has a reply is skipped a few lines below.
     ids = []
     try:
-        typ, data = M.search(None, "UNSEEN", "NOT", "X-GM-LABELS", f'"{DONE_LABEL}"')
+        typ, data = M.search(None, f"(SINCE {since})", "NOT", "X-GM-LABELS", f'"{DONE_LABEL}"')
         if typ == "OK":
             ids = data[0].split() if data and data[0] else []
         else:
             raise imaplib.IMAP4.error(f"search typ={typ}")
     except imaplib.IMAP4.error as e:
         log("label-search unsupported, falling back:", repr(e))
-        typ, data = M.search(None, "UNSEEN")
+        typ, data = M.search(None, f"(SINCE {since})")
         ids = data[0].split() if data and data[0] else []
         ids = [n for n in ids if DONE_LABEL not in msg_labels(M, n)]
-    log(f"todo={len(ids)} cap={MAX_PER_RUN} send={ENABLE_SEND}")
+    log(f"todo={len(ids)} cap={MAX_PER_RUN} send={ENABLE_SEND} window={LOOKBACK_DAYS}d")
     sent = escalated = skipped = brain_down = 0
     for num in reversed(ids):
         if sent + escalated >= MAX_PER_RUN:
@@ -666,9 +702,12 @@ def main():
         # few messages we are actually about to touch.
         if DONE_LABEL in msg_labels(M, num):
             continue
-        typ, md = M.fetch(num, "(BODY.PEEK[])")
-        if typ != "OK" or not md or not md[0]:
+        typ, md = M.fetch(num, "(X-GM-THRID BODY.PEEK[])")
+        if typ != "OK" or not md or not md[0] or not isinstance(md[0], tuple):
             continue
+        tm = THRID_RE.search(md[0][0] or b"")
+        if tm and tm.group(1).decode() in already:
+            mark_done(M, num); skipped += 1; continue   # somebody already replied
         msg = email.message_from_bytes(md[0][1])
         msgid = (msg.get("Message-ID") or "").strip()
         frm = email.utils.parseaddr(msg.get("From", ""))

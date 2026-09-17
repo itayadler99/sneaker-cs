@@ -113,8 +113,14 @@ def main():
         print(f"FAIL: no answer after {mins} min")
         wa(f"🔴 בדיקת קצה-לקצה של בוט שירות הלקוחות נכשלה: שלחתי פנייה כמו לקוח "
             f"ואף תשובה לא חזרה תוך {mins} דקות. הבוט לא עונה ללקוחות עכשיו.")
-    trash(sd_user, sd_pw, token)
-    trash(st_user, st_pw, token)
+    if answered:
+        trash(sd_user, sd_pw, token)
+        trash(st_user, st_pw, token)
+    else:
+        # Leave the probe where it is. On 2026-09-17 the cleanup ran on failure
+        # too and threw away the one message that could explain why no answer
+        # came back.
+        print(f"probe {token} left in place as evidence")
 
 
 if __name__ == "__main__":
