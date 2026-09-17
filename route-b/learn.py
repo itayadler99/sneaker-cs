@@ -189,17 +189,26 @@ def distill(pairs):
         f"[{i+1}] נושא: {p['subject']}\nפנייה: {p['question']}\nתשובה: {p['answer']}"
         for i, p in enumerate(pairs))
     prompt = DISTILL_PROMPT.format(store=STORE_NAME, pairs=blob)
-    payload = json.dumps({
-        "model": MODEL, "max_tokens": 2000,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages", data=payload, method="POST",
-        headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
-                 "content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=180) as r:
-        resp = json.load(r)
-    return "".join(b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text").strip()
+    # Same brain chain the worker uses (API -> claude CLI -> Vercel gateway ->
+    # OpenAI). This file used to call the Anthropic API on its own, so when that
+    # balance hit zero the nightly learning run failed every night from
+    # 2026-09-10 while the bot itself kept answering - the loop that keeps the
+    # bot sounding like us was dead and nothing said so.
+    import cloud_worker as cw
+    raw = ""
+    try:
+        raw = cw.brain_via_gateway(prompt, max_tokens=8000)
+        if not raw.strip():
+            raise RuntimeError("gateway returned empty text")
+    except Exception as e:
+        log("distill: gateway failed", repr(e))
+        try:
+            raw = cw.brain_via_cli(prompt)
+        except Exception as e2:
+            log("distill: cli failed", repr(e2))
+            raise
+    return (raw or "").strip()
+
 
 AUTHENTICITY = re.compile(
     r"(מקורי|מקוריים|מקורית|מקוריות|אורגינל|זיוף|מזויף|מזויפות|חיקוי|רפליק|"

@@ -463,7 +463,7 @@ def brain_via_cli(prompt):
     return (out.stdout or "").strip()
 
 
-def brain_via_gateway(prompt):
+def brain_via_gateway(prompt, max_tokens=1024):
     """Vercel AI Gateway - the cloud's own brain, billed to the Vercel account.
 
     GitHub Actions has no `claude` CLI and no subscription, so without this the
@@ -478,7 +478,10 @@ def brain_via_gateway(prompt):
     body = json.dumps({
         "model": GATEWAY_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1024,
+        # The caller sets the ceiling: a customer reply fits in 1024, distilling
+        # a week of human answers does not, and a cap that is too low comes back
+        # as an empty string rather than an error (2026-09-17: "empty distill").
+        "max_tokens": max_tokens,
     }).encode("utf-8")
     req = urllib.request.Request(
         "https://ai-gateway.vercel.sh/v1/chat/completions", data=body, method="POST",
