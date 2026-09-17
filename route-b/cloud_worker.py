@@ -151,9 +151,15 @@ NOT_AN_INQUIRY = re.compile(
     r"אישור הזמנה שלך התקבל|payment received)", re.I)
 
 
+# Our own mailboxes: the self test writes from one store to the other, and Itay
+# does not need mail about a probe we sent ourselves.
+OUR_BOXES = {a.lower() for a in (env("STORE_GMAIL_USER"), env("STUDIO_GMAIL_USER")) if a}
+
+
 def is_customer_inquiry(sender_email, subject):
     """True only for mail a human customer actually wrote to us."""
-    return not (NOT_A_CUSTOMER.search(sender_email or "")
+    return not ((sender_email or "").lower() in OUR_BOXES
+                or NOT_A_CUSTOMER.search(sender_email or "")
                 or NOT_AN_INQUIRY.search(subject or ""))
 
 
@@ -641,28 +647,37 @@ THRID_RE = re.compile(rb"X-GM-THRID\s+(\d+)")
 
 
 def answered_threads(imap, since):
-    """Thread ids that already got a reply from this mailbox, bot or human.
+    """thread id -> when we last replied on it (epoch seconds).
 
     This replaces \\Seen as the "handled" signal. \\Seen is not ours: a legacy
     Apps Script bot inside the Station Google account marks customer mail read
     and labels it `agent-processed` without answering it, and on 2026-09-17 that
-    is what swallowed 89 messages in three days - our search asked Gmail for
-    UNSEEN mail, so those were invisible to us and the customers got nothing.
-    What a reply exists for is a fact we can check; what someone marked read is
-    not."""
-    out = set()
+    is what swallowed 89 messages in three days.
+
+    The timestamp matters. Gmail groups by subject, so a customer who writes
+    again lands in the same thread as the answer we sent last week - treating
+    "this thread has a reply" as "handled" silently drops their new message.
+    Only a reply NEWER than the incoming mail means it was answered."""
+    out = {}
     try:
         imap.select(f'"{SENT_BOX}"', readonly=True)
         typ, data = imap.search(None, f"(SINCE {since})")
         ids = data[0].split() if typ == "OK" and data and data[0] else []
         for i in range(0, len(ids), 100):
             batch = b",".join(ids[i:i + 100]).decode()
-            typ, md = imap.fetch(batch, "(X-GM-THRID)")
+            typ, md = imap.fetch(batch, "(X-GM-THRID INTERNALDATE)")
             for item in (md or []):
                 raw = item if isinstance(item, bytes) else (item[0] if item else b"")
                 m = THRID_RE.search(raw or b"")
-                if m:
-                    out.add(m.group(1).decode())
+                if not m:
+                    continue
+                when = 0
+                try:
+                    when = time.mktime(imaplib.Internaldate2tuple(raw))
+                except Exception:
+                    pass
+                thr = m.group(1).decode()
+                out[thr] = max(out.get(thr, 0), when)
     except Exception as e:
         log("answered-threads warn", repr(e))
     return out
@@ -702,12 +717,20 @@ def main():
         # few messages we are actually about to touch.
         if DONE_LABEL in msg_labels(M, num):
             continue
-        typ, md = M.fetch(num, "(X-GM-THRID BODY.PEEK[])")
+        typ, md = M.fetch(num, "(X-GM-THRID INTERNALDATE BODY.PEEK[])")
         if typ != "OK" or not md or not md[0] or not isinstance(md[0], tuple):
             continue
-        tm = THRID_RE.search(md[0][0] or b"")
-        if tm and tm.group(1).decode() in already:
-            mark_done(M, num); skipped += 1; continue   # somebody already replied
+        meta = md[0][0] or b""
+        tm = THRID_RE.search(meta)
+        arrived = 0
+        try:
+            arrived = time.mktime(imaplib.Internaldate2tuple(meta))
+        except Exception:
+            pass
+        # Answered means answered AFTER this mail arrived. A reply that predates
+        # it belongs to the customer's previous question, not to this one.
+        if tm and already.get(tm.group(1).decode(), 0) > arrived:
+            mark_done(M, num); skipped += 1; continue
         msg = email.message_from_bytes(md[0][1])
         msgid = (msg.get("Message-ID") or "").strip()
         frm = email.utils.parseaddr(msg.get("From", ""))

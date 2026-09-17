@@ -75,11 +75,25 @@ def main():
         print("missing creds, skipping"); return
 
     token = f"SELFTEST-{uuid.uuid4().hex[:8]}"
+    # Reference a real recent order. A stranger with no order in Shopify is
+    # escalated by design, so a probe without one could never come back
+    # answered - it would report a broken bot every single day.
+    order_ref = ""
+    try:
+        os.environ.setdefault("STORE", "station")
+        import cloud_worker as cw
+        data = cw.shopify_gql(cw.ORDER_GQL % '"financial_status:paid"')
+        orders = cw._orders_from(data)
+        if orders:
+            order_ref = (orders[0].get("name") or "").lstrip("#")
+    except Exception as e:
+        print("probe order lookup failed", repr(e))
     m = EmailMessage()
     m["From"], m["To"] = sd_user, st_user
-    m["Subject"] = "מתי מגיעה ההזמנה שלי?"
-    m.set_content("היי, הזמנתי נעליים לפני כמה ימים ועדיין לא קיבלתי עדכון. "
-                  f"מה הסטטוס? תודה.\n\n[{token}]")
+    m["Subject"] = f"מתי מגיעה ההזמנה שלי? ({token[-6:]})"   # unique: Gmail threads by subject
+    m.set_content(f"היי, מה קורה עם ההזמנה שלי מספר {order_ref}? עדיין לא קיבלתי עדכון.\n\n[{token}]"
+                  if order_ref else
+                  f"היי, הזמנתי נעליים לפני כמה ימים ועדיין לא קיבלתי עדכון. מה הסטטוס?\n\n[{token}]")
     s = smtplib.SMTP_SSL("smtp.gmail.com", 465); s.login(sd_user, sd_pw)
     s.send_message(m); s.quit()
     sent_at = time.time()
