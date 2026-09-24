@@ -264,6 +264,96 @@ def strip_thread(body):
 
 quote_top = strip_thread   # old name, still used elsewhere
 
+
+# --- Shopify contact form ---------------------------------------------------
+# A message a customer types into the store's own "contact us" form does NOT
+# arrive from the customer. Shopify wraps it and sends it from mailer@shopify.com
+# with Reply-To set to the customer, so IGNORE_SENDER swallowed every one of
+# them: 2026-09-24, eight real questions (gift card, return of #2615, "please
+# call me") were labelled handled and never answered. Unwrap it and treat the
+# human inside as the sender.
+CONTACT_FORM_SUBJECT = re.compile(r"(הודעת לקוח חדשה|new (customer )?message)", re.I)
+CONTACT_FORM_MARK = re.compile(r"(טופס יצירת הקשר|contact form)", re.I)
+# Each store's form renders its own label set and its own layout: Station puts
+# "value" on the label line, Studio puts it on the next line, and the field is
+# called תגובה in one and תוכן in the other. Parse by label, not by position.
+CF_LABELS = (r"קוד מדינה|Country ?Code|Id|מזהה|"
+             r"ש[\u0590-\u05C7]*ם|Name|"
+             r"א[\u0590-\u05C7]*ימייל|דוא\"?ל|E-?mail|"
+             r"מספר טלפון|טלפון|Phone(?: ?Number)?|"
+             r"תגובה|תוכן|Body|Message|Comment")
+CF_FIELD_RE = re.compile(
+    r"(?:^|\n)[ \t]*(" + CF_LABELS + r")[ \t]*:[ \t]*\n?(.*?)"
+    r"(?=\n[ \t]*(?:" + CF_LABELS + r")[ \t]*:|\Z)", re.S)
+CONTACT_FORM_SUBJ_OUT = "פנייה מהאתר"
+
+
+def _cf_fields(raw):
+    """label -> value, for whichever of the two form layouts this store uses."""
+    flat = BIDI.sub("", raw or "").replace("\r\n", "\n").replace("\r", "\n")
+    return {m.group(1).strip(): m.group(2).strip() for m in CF_FIELD_RE.finditer(flat)}
+
+
+def _cf_pick(fields, pattern):
+    rx = re.compile(r"\A(?:" + pattern + r")\Z", re.I)
+    for k, v in fields.items():
+        if rx.match(k) and v:
+            return v
+    return ""
+
+
+def unwrap_contact_form(msg, sender_email, subject):
+    """Shopify contact-form notification -> the customer who actually wrote it.
+
+    Returns {name, email, phone, text} or None. The customer address comes from
+    Reply-To (what Shopify guarantees) and falls back to the body field."""
+    if "shopify" not in (sender_email or "").lower():
+        return None
+    raw = get_body(msg)
+    if not (CONTACT_FORM_SUBJECT.search(subject or "") or CONTACT_FORM_MARK.search(raw or "")):
+        return None
+    fields = _cf_fields(raw)
+    text = _cf_pick(fields, r"תגובה|תוכן|Body|Message|Comment")
+    if not text:
+        return None
+    reply_to = email.utils.parseaddr(dh(msg.get("Reply-To", "")))[1].lower()
+    cust = reply_to or _cf_pick(fields, r"א[\u0590-\u05C7]*ימייל|דוא\"?ל|E-?mail").lower()
+    if not cust or "@" not in cust or "shopify" in cust:
+        return None
+    return {"name": _cf_pick(fields, r"ש[\u0590-\u05C7]*ם|Name"),
+            "email": cust,
+            "phone": _cf_pick(fields, r"מספר טלפון|טלפון|Phone(?: ?Number)?"),
+            "text": text}
+
+
+def cf_fingerprint(cust_email, text):
+    norm = re.sub(r"\s+", " ", (text or "")).strip().lower()
+    return hashlib.sha1(f"{cust_email}|{norm}".encode("utf-8")).hexdigest()[:16]
+
+
+def cf_already_handled(imap, since, fingerprint, this_num):
+    """The contact form has no threading, so a customer who submits twice (it
+    happened the same evening, 14 seconds apart) would get two replies. Compare
+    against the contact-form mail we have already marked done."""
+    try:
+        typ, data = imap.search(None, f"(SINCE {since})", "FROM", "shopify.com",
+                                "X-GM-LABELS", f'"{DONE_LABEL}"')
+        if typ != "OK":
+            return False
+        for n in (data[0].split() if data and data[0] else []):
+            if n == this_num:
+                continue
+            typ, md = imap.fetch(n, "(BODY.PEEK[])")
+            if typ != "OK" or not md or not isinstance(md[0], tuple):
+                continue
+            m2 = email.message_from_bytes(md[0][1])
+            cf = unwrap_contact_form(m2, "mailer@shopify.com", dh(m2.get("Subject", "")))
+            if cf and cf_fingerprint(cf["email"], cf["text"]) == fingerprint:
+                return True
+    except Exception as e:
+        log("cf-dupe warn", repr(e))
+    return False
+
 # Typos the model has actually produced and shipped to customers. A rule in the
 # prompt did not stop them; a substitution does.
 TYPOS = {"משלןח": "משלוח", "הזמנח": "הזמנה", "תודח": "תודה", "שלןם": "שלום"}
@@ -739,13 +829,26 @@ def main():
         frm = email.utils.parseaddr(msg.get("From", ""))
         sender_name, sender_email = dh(frm[0]), frm[1].lower()
         subject = dh(msg.get("Subject", ""))
-        if not sender_email or IGNORE_SENDER.search(sender_email):
-            mark_done(M, num); skipped += 1; continue
-        if sender_email == USER.lower() or re.search(r"order\s+#?\d+\s+placed|\[Sneaker", subject, re.I):
-            mark_done(M, num); skipped += 1; continue
-        body = quote_top(get_body(msg))
-        if not body:
-            mark_done(M, num); skipped += 1; continue
+        cf = unwrap_contact_form(msg, sender_email, subject)
+        if cf:
+            fp = cf_fingerprint(cf["email"], cf["text"])
+            if cf_already_handled(M, since, fp, num):
+                log(f"CF-DUPE {cf['email']} | {cf['text'][:40]}")
+                mark_done(M, num); skipped += 1; continue
+            sender_name, sender_email = cf["name"], cf["email"]
+            subject = CONTACT_FORM_SUBJ_OUT
+            body = cf["text"] + (f"\n(טלפון שהלקוח השאיר: {cf['phone']})" if cf["phone"] else "")
+            msgid = ""   # Shopify's id, not the customer's: do not thread onto it
+            msg = None
+            log(f"CF {sender_email} | {cf['text'][:60]}")
+        else:
+            if not sender_email or IGNORE_SENDER.search(sender_email):
+                mark_done(M, num); skipped += 1; continue
+            if sender_email == USER.lower() or re.search(r"order\s+#?\d+\s+placed|\[Sneaker", subject, re.I):
+                mark_done(M, num); skipped += 1; continue
+            body = quote_top(get_body(msg))
+            if not body:
+                mark_done(M, num); skipped += 1; continue
 
         orders = find_orders(sender_email, body)
         res = ask_brain(sender_name, sender_email, subject, body, orders)
@@ -787,7 +890,8 @@ def main():
         if can_send:
             try:
                 em = send_reply(sender_email, sender_name, subject,
-                                res["reply"], msgid, dh(msg.get("References", "")))
+                                res["reply"], msgid,
+                                dh(msg.get("References", "")) if msg is not None else "")
                 # archive a copy into Sent so it threads in Gmail
                 try:
                     M.append(f'"{SENT_BOX}"', "(\\Seen)",
