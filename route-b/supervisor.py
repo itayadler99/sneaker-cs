@@ -160,6 +160,10 @@ WATCHED = [
     # Learning is not customer-facing, so one skipped nightly run is not worth
     # waking Itay for. 50h means "missed twice", which is a real problem.
     ("cs-learn.yml",    "למידה",      50),
+    # The auditor is the only check that argues with our own skip rules. If it
+    # stops running we are back to trusting the filter that ate the contact
+    # form for six days, and nothing would say so. Every 2h, so 5h = missed twice.
+    ("cs-audit.yml",    "ביקורת דילוגים", 5),
 ]
 
 

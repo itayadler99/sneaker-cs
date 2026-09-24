@@ -206,9 +206,27 @@ def msg_labels(imap, num):
     except Exception:
         return ""
 
-def mark_done(imap, num):
+# Every message leaves the loop in exactly one terminal state, written to the
+# mailbox as a Gmail label. Three outages in three weeks shared one shape: a
+# real customer's mail reached a terminal state that was neither "answered" nor
+# "handed to Itay", and nothing counted it. `cs-bot-seen` alone cannot tell the
+# difference between "we answered her" and "we threw it away", which is why
+# todo=0 looked healthy while sixteen people waited. audit_skipped.py reads
+# these labels and argues with our own skip rules.
+OUTCOME_ANSWERED = "cs-answered"     # the customer has a reply
+OUTCOME_TO_ITAY = "cs-to-itay"       # deliberately a human's call
+OUTCOME_SKIPPED = "cs-skipped"       # we decided nobody is waiting - the risky one
+OUTCOME_DUPLICATE = "cs-duplicate"   # same question, already answered elsewhere
+OUTCOMES = (OUTCOME_ANSWERED, OUTCOME_TO_ITAY, OUTCOME_SKIPPED, OUTCOME_DUPLICATE)
+
+
+def mark_done(imap, num, outcome=None):
+    """Mark the message handled, and say how. `outcome` is not optional in
+    spirit: a call without one leaves a message the auditor will flag as a
+    code path that fell through without deciding anything."""
+    labels = DONE_LABEL if not outcome else f"{DONE_LABEL} {outcome}"
     try:
-        imap.store(num, "+X-GM-LABELS", DONE_LABEL)
+        imap.store(num, "+X-GM-LABELS", labels)
     except Exception as e:
         log("label warn", repr(e))
 
@@ -639,11 +657,12 @@ def _brain_fallback(prompt, why):
 _API_DEAD = ""
 
 
-def ask_brain_prompt(prompt):
-    """Run one already-built prompt through the brain chain: API, then CLI.
+def brain_raw(prompt):
+    """Run a prompt through the brain chain and hand back the raw text.
 
-    Split out of ask_brain so the backlog tool can hand over a prompt carrying
-    its own extra rules without rebuilding the template by hand."""
+    Returns (raw, why). `why` is empty when a provider answered. Callers that
+    want the customer-reply shape use ask_brain_prompt; audit_skipped.py asks
+    its own question and parses its own JSON, so it needs the text itself."""
     payload = json.dumps({
         "model": MODEL,
         "max_tokens": 1024,
@@ -692,12 +711,23 @@ def ask_brain_prompt(prompt):
         raw = _brain_fallback(prompt, why)
         if not raw:
             note_brain_down(why)
-            # brain_down is not "this message is hard", it is "we have no brain".
-            # main() must leave the mail untouched so it is answered for real
-            # once a provider comes back, instead of being marked handled.
-            return {"action": "escalate", "reason": why, "brain_down": True}
+            return "", why
+    return raw, ""
+
+
+def ask_brain_prompt(prompt):
+    """One already-built prompt -> the customer-reply decision dict.
+
+    Split out of ask_brain so the backlog tool can hand over a prompt carrying
+    its own extra rules without rebuilding the template by hand."""
+    raw, why = brain_raw(prompt)
+    if why:
+        # brain_down is not "this message is hard", it is "we have no brain".
+        # main() must leave the mail untouched so it is answered for real once a
+        # provider comes back, instead of being marked handled.
+        return {"action": "escalate", "reason": why, "brain_down": True}
     if not raw:
-        return {"action": "escalate", "reason": why or "empty brain reply"}
+        return {"action": "escalate", "reason": "empty brain reply"}
     m = re.search(r"\{.*\}", raw, re.S)
     if not m:
         return {"action": "escalate", "reason": "no json from brain"}
@@ -850,7 +880,7 @@ def main():
         # Answered means answered AFTER this mail arrived. A reply that predates
         # it belongs to the customer's previous question, not to this one.
         if tm and already.get(tm.group(1).decode(), 0) > arrived:
-            mark_done(M, num); skipped += 1; continue
+            mark_done(M, num, OUTCOME_ANSWERED); skipped += 1; continue
         msg = email.message_from_bytes(md[0][1])
         msgid = (msg.get("Message-ID") or "").strip()
         frm = email.utils.parseaddr(msg.get("From", ""))
@@ -861,7 +891,7 @@ def main():
             fp = cf_fingerprint(cf["email"], cf["text"])
             if cf_already_handled(M, since, fp, num):
                 log(f"CF-DUPE {cf['email']} | {cf['text'][:40]}")
-                mark_done(M, num); skipped += 1; continue
+                mark_done(M, num, OUTCOME_DUPLICATE); skipped += 1; continue
             sender_name, sender_email = cf["name"], cf["email"]
             subject = CONTACT_FORM_SUBJ_OUT
             body = cf["text"] + (f"\n(טלפון שהלקוח השאיר: {cf['phone']})" if cf["phone"] else "")
@@ -870,12 +900,12 @@ def main():
             log(f"CF {sender_email} | {cf['text'][:60]}")
         else:
             if not sender_email or IGNORE_SENDER.search(sender_email):
-                mark_done(M, num); skipped += 1; continue
+                mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
             if sender_email == USER.lower() or re.search(r"order\s+#?\d+\s+placed|\[Sneaker", subject, re.I):
-                mark_done(M, num); skipped += 1; continue
+                mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
             body = quote_top(get_body(msg))
             if not body:
-                mark_done(M, num); skipped += 1; continue
+                mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
 
         orders = find_orders(sender_email, body)
         res = ask_brain(sender_name, sender_email, subject, body, orders)
@@ -896,6 +926,7 @@ def main():
         # reports what it decided to believe, and on 2026-08-26 it believed a
         # non-customer had an order in transit.
         claimed = order_claim_violation(res.get("reply", ""), bool(orders))
+        delivered = False
         can_send = (res.get("action") == "draft" and conf >= MIN_CONF
                     and not sensitive and not promised and not claimed
                     and ENABLE_SEND)
@@ -928,6 +959,7 @@ def main():
                 # mark the customer mail as read (handled)
                 M.store(num, "+FLAGS", "\\Seen")
                 sent += 1
+                delivered = True
                 log(f"SENT  {sender_email} | {subject[:40]} | conf={conf}")
                 tg(f"🤖 {STORE_NAME} — נשלחה תשובה אוטומטית ללקוח\n"
                    f"אל: {sender_name} <{sender_email}>\n"
@@ -964,7 +996,9 @@ def main():
                    f"מ: {sender_name} <{sender_email}>\n"
                    f"נושא: {subject}\n"
                    f"סיבה: {why}")
-        mark_done(M, num)   # durable: never re-bill the brain on this message again
+        # durable: never re-bill the brain on this message again, and record
+        # which of the two real endings this was.
+        mark_done(M, num, OUTCOME_ANSWERED if delivered else OUTCOME_TO_ITAY)
     M.logout()
     if brain_down:
         alert_brain_down(brain_down)
