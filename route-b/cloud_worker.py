@@ -617,6 +617,28 @@ def ask_brain(sender_name, sender_email, subject, message, orders=None):
     return ask_brain_prompt(prompt)
 
 
+class _SkipAPI(Exception):
+    """The API already said the balance is empty; do not call it again."""
+
+
+def _brain_fallback(prompt, why):
+    """Every brain except the Anthropic API, in order. Returns the raw reply,
+    or "" when no provider answered at all."""
+    for name, fn in (("claude CLI", brain_via_cli), ("vercel gateway", brain_via_gateway),
+                     ("openai", brain_via_openai)):
+        try:
+            raw = fn(prompt)
+            if raw:
+                log(f"brain fallback -> {name} after", why)
+                return raw
+        except Exception as e:
+            log(f"brain fallback {name} failed", repr(e))
+    return ""
+
+
+_API_DEAD = ""
+
+
 def ask_brain_prompt(prompt):
     """Run one already-built prompt through the brain chain: API, then CLI.
 
@@ -636,14 +658,26 @@ def ask_brain_prompt(prompt):
         },
     )
     raw = ""
+    # The account has been out of credit since 2026-09-02, and every call costs
+    # a round trip before the chain falls through to the gateway that actually
+    # answers. Once the API has said the balance is empty, stop asking it for
+    # the rest of this process. A fresh run tries it once, so topping the
+    # account up needs no code change.
+    why = _API_DEAD
     try:
+        if why:
+            raise _SkipAPI()
         with urllib.request.urlopen(req, timeout=120) as r:
             resp = json.load(r)
         raw = "".join(b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text").strip()
+    except _SkipAPI:
+        pass
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:200]
         log("anthropic HTTPError", e.code, detail)
         why = f"api {e.code}"
+        if e.code in (400, 401, 402, 403) and "credit balance" in detail.lower():
+            globals()["_API_DEAD"] = why
     except Exception as e:
         why = f"api error {e!r}"
     else:
@@ -655,16 +689,8 @@ def ask_brain_prompt(prompt):
         # subscription and costs nothing per call, so it takes over whenever the
         # API refuses. In GitHub Actions the CLI does not exist, the call raises,
         # and we escalate exactly as before.
-        for name, fn in (("claude CLI", brain_via_cli), ("vercel gateway", brain_via_gateway),
-                         ("openai", brain_via_openai)):
-            try:
-                raw = fn(prompt)
-                if raw:
-                    log(f"brain fallback -> {name} after", why)
-                    break
-            except Exception as e:
-                log(f"brain fallback {name} failed", repr(e))
-        else:
+        raw = _brain_fallback(prompt, why)
+        if not raw:
             note_brain_down(why)
             # brain_down is not "this message is hard", it is "we have no brain".
             # main() must leave the mail untouched so it is answered for real
