@@ -445,6 +445,75 @@ def format_orders(orders):
         out.append("\n".join(lines))
     return "\n\n".join(out)
 
+# ---- Itay's voice (owner instruction 2026-09-26) ----
+# "בן אדם ששואל מה קורה עם המשלוח - אתה לא צריך לזהות כלום. קודם כל מרגיעים."
+# Before this, a customer whose order the lookup missed got "לא הצלחתי לאתר את
+# ההזמנה, תשלח מספר הזמנה", or nothing at all while the mail waited for Itay.
+# Neither is how the store talks. The template below is Itay's own sent reply.
+from voice import greeting, shipping_template  # noqa: E402
+
+
+def order_is_stale(orders, days=30):
+    """An unfulfilled order older than this is a real problem, not a customer
+    to calm down with "הכול מתנהל בהתאם לטווחי הזמנים". Those stay with Itay."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    for o in orders or []:
+        if "UNFULFILLED" not in (o.get("displayFulfillmentStatus") or "").upper():
+            continue
+        try:
+            made = datetime.strptime((o.get("createdAt") or "")[:10], "%Y-%m-%d")
+        except ValueError:
+            continue
+        if made < cutoff:
+            return True
+    return False
+
+
+def _own_opener(res):
+    """Itay opens with the time of day ("היי, ערב טוב 😊"), not with the
+    customer's name. The model drifts back to "היי Uri,", so the first line is
+    set here rather than asked for."""
+    lines = (res.get("reply") or "").split("\n")
+    if lines and len(lines[0]) <= 40 and re.match(r"\s*(היי|שלום|הי)\b", lines[0]):
+        lines[0] = f"{greeting()} 😊"
+        res = dict(res, reply="\n".join(lines))
+    return res
+
+
+def apply_itay_voice(res, subject, body, orders, sensitive):
+    """Where-is-my-order questions get Itay's own template whenever the model
+    would otherwise ask the customer to identify themselves, invent a reason,
+    or hand a simple question to Itay because the lookup missed the order.
+    Returns (res, used_template)."""
+    if sensitive or order_is_stale(orders) or not SHIPPING_Q.search(f"{subject} {body}"):
+        return res, False
+    reply = res.get("reply") or ""
+    if orders and res.get("action") == "draft" and not ASKS_FOR_ID.search(reply) \
+            and not INVENTED.search(reply):
+        return _own_opener(res), False
+    return ({"action": "draft", "reply": shipping_template(STORE_NAME), "confidence": 0.9,
+             "reason": "תבנית משלוח של איתי", "order_found": bool(orders),
+             "order_number": res.get("order_number", "")}, True)
+
+
+# A "where is my order / when will it arrive" question.
+SHIPPING_Q = re.compile(
+    r"(איפה|מתי|הגיע|יגיע|תגיע|סטטוס|משלוח|המשלוח|עדכון|ממתין|מחכה|לא קיבלתי|"
+    r"עוד לא|עדיין לא|כמה זמן|where|when|status|tracking|shipping|arrive)", re.I)
+
+# Sentences Itay does not want customers to see. Asking the customer to prove
+# who they are, and reasons/promises nobody verified.
+ASKS_FOR_ID = re.compile(
+    r"(לא\s*(הצלחתי|הצלחנו|מצאתי|מצאנו|זיהיתי|זיהינו|מזהה|מזהים|איתרנו|איתרתי)|"
+    r"(לאתר|לזהות)\s*את\s*ה?(הזמנה|הזמנתך|פרטים)|"
+    r"(שלח|שלחי|תשלח|תשלחי|לשלוח|לציין|תוכל|תוכלי)\S*\s.{0,25}(מספר\s*ה?הזמנה|שם\s*מלא|כתובת\s*ה?מייל|טלפון)|"
+    r"לוודא\s*את\s*(כתובת|מספר)|תחת\s*כתובת\s*מייל\s*אחרת)", re.I)
+INVENTED = re.compile(
+    r"(מול\s*ה?ספק|הספקים|מהספק|מפעל|חוסר\s*במלאי|מכס|מלחמה|המצב\s*בארץ|"
+    r"נבדוק\s*(את\s*זה|לעומק|מיד|מול)|אנחנו\s*בודקים|נחזור\s*אלי|נעדכן\s*אות|"
+    r"לפנות\s*גם\s*למייל|לא\s*בסדר\s*מצידנו|חינם)", re.I)
+
+
 # ---- brain: Anthropic Messages API ----
 PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות סניקרס ישראלית ({store}). את עונה כמו בן אדם, לא כמו בוט.
 
@@ -455,7 +524,7 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 
 שלב 2 — דיוק:
 - עני אך ורק על בסיס נתוני ההזמנה החיים + הידע המצורף. אסור להמציא תאריך, מספר מעקב, מחיר, או מדיניות.
-- אם לא מצאת הזמנה תואמת, וזו שאלה כללית של "איפה ההזמנה/מתי יגיע" — תני הרגעה כללית לפי הקשר העיכובים בידע, בלי להמציא מספר מעקב או תאריך.
+- אם לא מצאת הזמנה תואמת, וזו שאלה של "איפה ההזמנה/מתי יגיע" — כתבי את תבנית איתי (למטה) כמו שהיא. לא מזכירים שלא מצאנו, לא מבקשים פרטים.
 - אם הלקוח שואל על משהו שאי אפשר לאמת מהנתונים — escalate.
 
 שלב 3 — אסור בהחלט להציע (גם אם הלקוח לא ביקש):
@@ -470,18 +539,19 @@ PROMPT_TMPL = """את נציגת שירות לקוחות אמיתית בחנות
 שלב 4 — מתי לא לענות (escalate):
 - תלונה, נזק, מוצר פגום, החזר כספי, החלפה, ביטול, איום משפטי, שאלה על מקוריות, או כל מקרה שאת לא בטוחה בו = אל תכתבי תשובה, החזרי action=escalate.
 
-טון ושפה — שיישמע אנושי:
-- עברית תקנית וטבעית, כמו אדם אמיתי שכותב ללקוח. בדקי איות לפני שאת מחזירה.
-- חם, אישי, קצר וענייני. פני ללקוח בשמו הפרטי.
-- התאימי את לשון הפנייה למין של הלקוח לפי שמו. אם השם לא מזהה מין בבירור, נסחי ניטרלי ("אפשר לעקוב כאן") במקום לנחש "את" או "אתה". אסור לערבב בתוך אותו משפט.
-- בלי מקפים ארוכים. בלי סופרלטיבים. בלי ניסוחים רובוטיים או תבניתיים. בלי "אני כאן כדי לעזור" וקלישאות בוט.
-- חתמי בצורה טבעית בשם החנות.
-
-מבנה התשובה — חובה, שלושת החלקים:
-1. פנייה בשם הלקוח ומשפט קצר שמראה שקראת מה הוא כתב.
-2. התשובה עצמה לפי נתוני ההזמנה.
-3. משפט סיום שמזמין אותו לחזור אלינו אם צריך.
-תשובה של שורה אחת יבשה נחשבת כישלון גם אם היא נכונה עובדתית.
+טון ושפה — כמו איתי, בעל החנות (גובר על כל דוגמה נלמדת למטה):
+- פתיחה: "{greeting}" ואחריה 😊. שם פרטי רק אם הוא מופיע בבירור, לא חובה.
+- לשאלת "איפה ההזמנה / מתי יגיע / עוד לא קיבלתי", זו התבנית של איתי. כתבי קרוב אליה ככל האפשר:
+  "כפי שמצוין באתר, זמני המשלוח נעים בין 7-18 ימי עסקים, בתוספת של עד 4 ימי עסקים עבור עיבוד והכנת ההזמנה.
+  הכול מתנהל בהתאם לטווחי הזמנים, וכרגע נותר רק להמתין לעדכון מחברת השילוח לצורך תיאום המסירה."
+  אם בבלוק ההזמנות יש מספר מעקב אמיתי, מותר להוסיף שורה אחת עם הקישור. זהו.
+- ⛔ אסור לבקש מהלקוח מספר הזמנה, שם מלא, מייל או טלפון. אסור לכתוב "לא מצאתי / לא הצלחתי לאתר / לא מזהה". לא צריך לזהות כלום כדי להרגיע.
+- ⛔ אסור להמציא סיבה לעיכוב (ספק, מלאי, מפעל, מכס, מלחמה) ואסור להבטיח "נבדוק ונחזור אליך". אם אין עובדה בבלוק, לא כותבים אותה.
+- ⛔ אסור להתנצל על עיכוב או לכתוב שזה "לא בסדר מצידנו" כל עוד ההזמנה בתוך 22 ימי עסקים. בתוך הטווח = הכול תקין.
+- לא לפרט את הדגמים והמידות מההזמנה אלא אם הלקוח שאל עליהם.
+- קצר: 3-5 שורות. סיום: ברכה קצרה ("שיהיה שבוע טוב!" / "שבת שלום!"), ובשורה אחרונה {store}.
+- התאימי לשון פנייה למין הלקוח לפי שמו; לא ברור = ניסוח ניטרלי.
+- בלי מקפים ארוכים, בלי קלישאות בוט.
 
 ⛔ אסור להעתיק לתוך התשובה את המייל של הלקוח, שורות שמתחילות ב-">", או היסטוריית התכתבות.
 כתבי רק את הטקסט החדש שלך.
@@ -627,7 +697,7 @@ def ask_brain(sender_name, sender_email, subject, message, orders=None):
         orders = find_orders(sender_email, message)
     orders_block = format_orders(orders)
     prompt = PROMPT_TMPL.format(
-        store=STORE_NAME, kb=KB, orders=orders_block,
+        store=STORE_NAME, kb=KB, orders=orders_block, greeting=greeting(),
         learned=LEARNED or "(עדיין אין דוגמאות נלמדות.)",
         sender_name=sender_name, sender_email=sender_email,
         subject=subject, message=message,
@@ -918,18 +988,26 @@ def main():
             brain_down += 1
             log(f"BRAIN-DOWN leaving untouched: {sender_email} | {subject[:40]}")
             continue
-        conf = float(res.get("confidence") or 0)
         sensitive = bool(SENSITIVE.search(subject + " " + body))
+        res, templated = apply_itay_voice(res, subject, body, orders, sensitive)
+        if templated:
+            log(f"ITAY-TEMPLATE {sender_email} | orders={len(orders)}")
+        conf = float(res.get("confidence") or 0)
         # Read the reply we are about to send, not only the mail we received.
         promised = outgoing_violation(res.get("reply", ""))
         # bool(orders) is Shopify's answer, not res["order_found"] — the model
         # reports what it decided to believe, and on 2026-08-26 it believed a
-        # non-customer had an order in transit.
-        claimed = order_claim_violation(res.get("reply", ""), bool(orders))
+        # non-customer had an order in transit. Itay's template makes no claim
+        # about a specific order, it quotes the site's shipping window.
+        claimed = None if templated else order_claim_violation(res.get("reply", ""), bool(orders))
+        # Anything else that asks the customer to identify themselves or gives
+        # an unverified reason does not go out on its own.
+        off_voice = (not templated and bool(ASKS_FOR_ID.search(res.get("reply", ""))
+                                            or INVENTED.search(res.get("reply", ""))))
         delivered = False
         can_send = (res.get("action") == "draft" and conf >= MIN_CONF
                     and not sensitive and not promised and not claimed
-                    and ENABLE_SEND)
+                    and not off_voice and ENABLE_SEND)
         if claimed:
             kind, phrase = claimed
             why = ("הבוט טען שביצע פעולה שאין לו בכלל הרשאה לבצע (הטוקן קריאה בלבד)"

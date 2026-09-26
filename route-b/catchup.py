@@ -18,6 +18,7 @@ import imaplib, smtplib, email, json, os, re, time, socket
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from promise_guard import violation
+from voice import shipping_template
 from order_claim_guard import violation as order_claim_violation
 import urllib.request
 from email.header import decode_header, make_header
@@ -66,18 +67,7 @@ kind חייב להיות אחד מאלה:
 {body}
 """
 
-REPLY_HE = """היי {name},
-
-תודה על הפנייה.
-
-ההזמנה שלך בדרך אליך.
-
-ברגע שחברת השילוח תגיע לאזור שלך, נציג ייצור איתך קשר טלפוני לתיאום מסירה.
-
-אם יש עוד משהו, אנחנו כאן.
-
-{store}
-"""
+REPLY_HE = None  # Hebrew replies use voice.shipping_template (Itay's wording, 2026-09-26)
 
 REPLY_EN = """Hi {name},
 
@@ -317,8 +307,8 @@ def send_reply(M, user, pw, store_name, item):
     # able to slip a refund/cancellation offer past review. Same guard the live
     # worker uses (2026-08-24 incident).
     body_is_hebrew = bool(re.search(r"[\u0590-\u05FF]", item["body"]))
-    tpl = REPLY_HE if body_is_hebrew else REPLY_EN
-    text = tpl.format(name=first_name(item["name"], item["email"]), store=store_name)
+    text = (shipping_template(store_name) if body_is_hebrew else
+            REPLY_EN.format(name=first_name(item["name"], item["email"]), store=store_name))
     promised = violation(text)
     if promised:
         log(f"BLOCKED-PROMISE catchup template promises \"{promised}\" — not sending")
