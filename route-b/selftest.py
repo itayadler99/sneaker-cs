@@ -101,6 +101,7 @@ def main():
 
     # The bot answers the Studio address, so the reply lands in Studio's inbox.
     answered = False
+    reply_text = ""
     while time.time() - sent_at < WAIT_MIN * 60 and not answered:
         time.sleep(60)
         try:
@@ -115,6 +116,7 @@ def main():
                 msg = email.message_from_bytes(md[0][1])
                 if msg.get("X-CS-Bot") or "הזמנה" in (msg.get("Subject") or ""):
                     answered = True
+                    reply_text = _text_of(msg)
                     break
             M.logout()
         except Exception as e:
@@ -127,7 +129,23 @@ def main():
         print(f"FAIL: no answer after {mins} min")
         wa(f"🔴 בדיקת קצה-לקצה של בוט שירות הלקוחות נכשלה: שלחתי פנייה כמו לקוח "
             f"ואף תשובה לא חזרה תוך {mins} דקות. הבוט לא עונה ללקוחות עכשיו.")
+    problems = []
     if answered:
+        # "An answer came back" passed on 2026-09-27 while the two stores were
+        # mailing each other every few minutes. Check what was said, and that
+        # Studio's bot did not answer Station's reply.
+        problems = quality_problems(reply_text)
+        time.sleep(LOOP_WAIT_MIN * 60)
+        # The probe itself is one mail from Studio in that inbox; anything more is a bounce.
+        bounced = max(0, count_from(st_user, st_pw, sd_user, token) - 1)
+        if bounced:
+            problems.append(f"לולאה: הבוט של סטודיו ענה {bounced} פעמים לתשובה של סטיישן")
+        if problems:
+            print("FAIL quality:", "; ".join(problems))
+            wa("🔴 בדיקה עצמית של בוט השירות: התשובה חזרה אבל יש בעיה - " + "; ".join(problems))
+        else:
+            print("OK quality: phrasing clean, no bot-to-bot loop")
+    if answered and not problems:
         trash(sd_user, sd_pw, token)
         trash(st_user, st_pw, token)
     else:
@@ -135,6 +153,42 @@ def main():
         # too and threw away the one message that could explain why no answer
         # came back.
         print(f"probe {token} left in place as evidence")
+
+
+LOOP_WAIT_MIN = int(os.environ.get("SELFTEST_LOOP_WAIT_MIN", "12"))
+
+
+def _text_of(msg):
+    for p in msg.walk():
+        if p.get_content_type() == "text/plain":
+            return (p.get_payload(decode=True) or b"").decode(p.get_content_charset() or "utf-8", "replace")
+    return ""
+
+
+def quality_problems(text):
+    """The reply must sound like Itay: no asking the customer to identify
+    themselves, no invented reasons (owner instruction 2026-09-26)."""
+    from cloud_worker import ASKS_FOR_ID, INVENTED
+    out = []
+    m = ASKS_FOR_ID.search(text or "")
+    if m:
+        out.append(f"ביקש זיהוי מהלקוח (\"{m.group(0)}\")")
+    m = INVENTED.search(text or "")
+    if m:
+        out.append(f"המציא סיבה/הבטחה (\"{m.group(0)}\")")
+    if "7-18" not in (text or "") and "7 ל-18" not in (text or ""):
+        out.append("לא ציין 7-18 ימי עסקים")
+    return out
+
+
+def count_from(box_user, box_pw, sender, token):
+    """How many mails from `sender` about this probe reached `box_user`."""
+    M = imaplib.IMAP4_SSL("imap.gmail.com"); M.login(box_user, box_pw)
+    M.select("INBOX", readonly=True)
+    typ, d = M.search(None, "FROM", sender, "SUBJECT", token[-6:])
+    n = len(d[0].split()) if typ == "OK" and d and d[0] else 0
+    M.logout()
+    return n
 
 
 if __name__ == "__main__":
