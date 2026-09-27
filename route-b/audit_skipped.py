@@ -186,6 +186,10 @@ def describe(M, nums):
         if typ != "OK" or not md or not isinstance(md[0], tuple):
             continue
         msg = email.message_from_bytes(md[0][1])
+        # A bot-written mail never holds a waiting human. Releasing one is how
+        # the two stores' bots could restart answering each other.
+        if msg.get("X-CS-Bot"):
+            continue
         out.append({
             "num": n,
             "from": dh(msg.get("From", "")),

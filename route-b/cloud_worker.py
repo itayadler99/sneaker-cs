@@ -971,6 +971,13 @@ def main():
         else:
             if not sender_email or IGNORE_SENDER.search(sender_email):
                 mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
+            # Never answer a bot. On 2026-09-27 the self-test probe from Studio
+            # got a Station reply, Studio's bot answered that reply, and the two
+            # stores mailed each other ~100 times in four hours. Any mail stamped
+            # by a bot, and any reply coming from one of our own boxes, stops here.
+            if msg.get(BOT_HEADER) or (sender_email in OUR_BOXES
+                                       and subject.strip().lower().startswith("re:")):
+                mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
             if sender_email == USER.lower() or re.search(r"order\s+#?\d+\s+placed|\[Sneaker", subject, re.I):
                 mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
             body = quote_top(get_body(msg))
