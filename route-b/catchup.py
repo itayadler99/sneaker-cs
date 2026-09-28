@@ -338,6 +338,8 @@ def send_reply(M, user, pw, store_name, item):
     em["Date"] = formatdate(localtime=True)
     em["Message-ID"] = make_msgid(domain=user.split("@")[-1])
     em[BOT_HEADER] = "catchup"
+    em["Auto-Submitted"] = "auto-replied"   # RFC 3834
+    em["X-Auto-Response-Suppress"] = "All"
     if item["msgid"]:
         em["In-Reply-To"] = hdr(item["msgid"])
         em["References"] = hdr(item["refs"] + " " + item["msgid"])

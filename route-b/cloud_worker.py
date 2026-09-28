@@ -860,6 +860,10 @@ def send_reply(to_addr, to_name, subject, body, in_reply_to, references):
     # standard; without this stamp it would distil the bot's own replies back
     # into the few-shot bank and slowly drift away from how Itay actually writes.
     em[BOT_HEADER] = "cloud-worker"
+    # RFC 3834: tell every other mail robot this is an automatic reply, so no
+    # auto-responder (ours or anyone's) answers it back.
+    em["Auto-Submitted"] = "auto-replied"
+    em["X-Auto-Response-Suppress"] = "All"
     if in_reply_to:
         em["In-Reply-To"] = hdr(in_reply_to)
         em["References"] = hdr(f"{references} {in_reply_to}") if references else hdr(in_reply_to)
@@ -1038,6 +1042,11 @@ def main():
             # got a Station reply, Studio's bot answered that reply, and the two
             # stores mailed each other ~100 times in four hours. Any mail stamped
             # by a bot, and any reply coming from one of our own boxes, stops here.
+            # RFC 3834: anything auto-submitted (vacation replies, other bots,
+            # delivery notices) is never a customer waiting for an answer.
+            auto = (msg.get("Auto-Submitted") or "no").strip().lower()
+            if auto != "no" or msg.get("X-Autoreply") or msg.get("X-Autorespond"):
+                mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
             if msg.get(BOT_HEADER) or (sender_email in OUR_BOXES
                                        and subject.strip().lower().startswith("re:")):
                 mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
