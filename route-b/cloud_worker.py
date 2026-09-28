@@ -86,6 +86,11 @@ try:
     LEARNED = open(_LEARNED_PATH, encoding="utf-8").read().strip()
 except Exception:
     LEARNED = ""
+# Rules distilled from threads where Itay answered after the bot (learn.py).
+try:
+    CORRECTIONS = open(os.path.join(ROOT, "kb", f"corrections-{STORE}.md"), encoding="utf-8").read().strip()
+except Exception:
+    CORRECTIONS = ""
 
 IGNORE_SENDER = re.compile(
     r"@(t\.shopifyemail\.com|shopify\.com|email\.shopify\.com|notifications\.tiktok\.com|"
@@ -95,7 +100,7 @@ IGNORE_SENDER = re.compile(
 )
 # Hard safety net: never auto-send if any of these appear, regardless of model output.
 SENSITIVE = re.compile(
-    r"(החזר|זיכוי|ביטול|פגום|שבור|נזק|תלונה|מתבייש|עורך דין|תביעה|משטרה|הונאה|רמאות|"
+    r"(החזר|זיכוי|ביטול|פגום|שבור|נזק|תלונה|מתבייש|עורך דין|עו\"ד|תביעה|בית משפט|בית המשפט|הגנת הצרכן|משטרה|הונאה|רמאות|"
     # Authenticity (2026-09-10, owner instruction): the bot never answers this, in either
     # direction. A customer who asks gets escalated to Itay, never an automatic reply.
     r"מקורי|מקוריים|מקורית|מקוריות|אורגינל|זיוף|מזויף|מזויפות|חיקוי|רפליק|"
@@ -485,9 +490,17 @@ def apply_itay_voice(res, subject, body, orders, sensitive):
     would otherwise ask the customer to identify themselves, invent a reason,
     or hand a simple question to Itay because the lookup missed the order.
     Returns (res, used_template)."""
-    if sensitive or order_is_stale(orders) or not SHIPPING_Q.search(f"{subject} {body}"):
-        return res, False
+    text = f"{subject} {body}"
+    # The template answers ONE question: "where is it / when will it come".
+    # On 2026-09-28 it also answered "why was it sent to a pickup point", "is it
+    # split into two parcels" and "give me your phone number" - Itay then had to
+    # answer each of those himself (kb/corrections-station.md).
+    if (sensitive or order_is_stale(orders) or not SHIPPING_Q.search(text)
+            or OTHER_TOPIC.search(text)):
+        return (_own_opener(res) if res.get("action") == "draft" else res), False
     reply = res.get("reply") or ""
+    if res.get("action") == "escalate" and orders:
+        return res, False   # the order was found and the model still saw a reason
     if orders and res.get("action") == "draft" and not ASKS_FOR_ID.search(reply) \
             and not INVENTED.search(reply):
         return _own_opener(res), False
@@ -500,6 +513,12 @@ def apply_itay_voice(res, subject, body, orders, sensitive):
 SHIPPING_Q = re.compile(
     r"(איפה|מתי|הגיע|יגיע|תגיע|סטטוס|משלוח|המשלוח|עדכון|ממתין|מחכה|לא קיבלתי|"
     r"עוד לא|עדיין לא|כמה זמן|where|when|status|tracking|shipping|arrive)", re.I)
+
+# Anything beyond "where/when": these need a real answer, not the template.
+OTHER_TOPIC = re.compile(
+    r"(נקודת\s*איסוף|איסוף|טלפון|להתקשר|מספר\s*טלפון|פוצל|פיצול|חלק\s*מה|שתי\s*חבילות|"
+    r"חבילה\s*אחת|כתובת|החלפ|מידה|קבלה|חשבונית|ביטול|לבטל|החזר|בית\s*משפט|תביעה|"
+    r"הגנת\s*הצרכן|חוק|הגיע\s*(לא\s*נכון|פגום|שבור)|זוג\s*(אחד|שני)|רק\s*זוג)", re.I)
 
 # Sentences Itay does not want customers to see. Asking the customer to prove
 # who they are, and reasons/promises nobody verified.
@@ -565,6 +584,9 @@ confidence = כמה את בטוחה בעובדות שבתשובה, לא כמה �
 - 0.50-0.79: לא נמצאה הזמנה תואמת, והתשובה כללית לפי הידע בלבד.
 - מתחת ל-0.50: ניחוש. במקרה כזה action=escalate.
 תשובה נכונה שנשענת על הזמנה אמיתית היא 0.9, גם אם היא קצרה. אל תורידי ציון מתוך זהירות.
+
+=== תיקונים של איתי (גוברים על כל דוגמה ועל כל כלל טון למטה) ===
+{corrections}
 
 === הזמנות הלקוח (נשלף חי מ-Shopify, מקור אמת) ===
 {orders}
@@ -698,6 +720,7 @@ def ask_brain(sender_name, sender_email, subject, message, orders=None):
     orders_block = format_orders(orders)
     prompt = PROMPT_TMPL.format(
         store=STORE_NAME, kb=KB, orders=orders_block, greeting=greeting(),
+        corrections=CORRECTIONS or "(אין עדיין.)",
         learned=LEARNED or "(עדיין אין דוגמאות נלמדות.)",
         sender_name=sender_name, sender_email=sender_email,
         subject=subject, message=message,
@@ -903,12 +926,52 @@ def answered_threads(imap, since):
     return out
 
 
+HUMAN_OWNS_DAYS = int(env("HUMAN_OWNS_DAYS", "14"))
+BOT_REPEAT_HOURS = int(env("BOT_REPEAT_HOURS", "12"))
+
+
+def recent_recipients(imap):
+    """(human, bot): address -> epoch of our last reply to it.
+
+    Owner instruction 2026-09-28: "אם אתה רואה שאני עונה בעצמי למישהו במייל,
+    אל תענה לו אחרי זה בהודעה הגנרית". That day the bot answered a customer six
+    times in two hours after Itay had already handled her, and thanked another
+    for "the kind words" right after Itay answered his legal threat. A reply
+    without our X-CS-Bot stamp is Itay; once he is in the conversation it is his."""
+    human, bot = {}, {}
+    since = (datetime.utcnow() - timedelta(days=HUMAN_OWNS_DAYS)).strftime("%d-%b-%Y")
+    try:
+        imap.select(f'"{SENT_BOX}"', readonly=True)
+        typ, data = imap.search(None, f"(SINCE {since})")
+        ids = data[0].split() if typ == "OK" and data and data[0] else []
+        for i in range(0, len(ids), 100):
+            batch = b",".join(ids[i:i + 100]).decode()
+            typ, md = imap.fetch(batch, "(INTERNALDATE BODY.PEEK[HEADER.FIELDS (TO X-CS-BOT)])")
+            for item in (md or []):
+                if not isinstance(item, tuple):
+                    continue
+                hdrs = email.message_from_bytes(item[1] or b"")
+                to = email.utils.parseaddr(hdrs.get("To", ""))[1].lower()
+                if not to or to in OUR_BOXES:
+                    continue
+                try:
+                    when = time.mktime(imaplib.Internaldate2tuple(item[0]))
+                except Exception:
+                    continue
+                d = bot if hdrs.get(BOT_HEADER) else human
+                d[to] = max(d.get(to, 0), when)
+    except Exception as e:
+        log("recent-recipients warn", repr(e))
+    return human, bot
+
+
 def main():
     if not ANTHROPIC_API_KEY:
         log("FATAL no ANTHROPIC_API_KEY"); print("DONE sent=0 escalated=0"); return
     M = imap_connect()
     since = (datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
     already = answered_threads(M, since)
+    human_to, bot_to = recent_recipients(M)
     M.select("INBOX")
     # Recent mail we have not handled ourselves. Deliberately NOT filtered by
     # UNSEEN: read/unread belongs to whoever touched the mailbox last, and in
@@ -984,6 +1047,15 @@ def main():
             if not body:
                 mark_done(M, num, OUTCOME_SKIPPED); skipped += 1; continue
 
+        # Itay is already talking to this customer: stay out, leave it unread
+        # for him, and do not mail him about it - he is in the thread.
+        if human_to.get(sender_email):
+            log(f"ITAY-OWNS {sender_email} | {subject[:40]}")
+            mark_done(M, num, OUTCOME_TO_ITAY); escalated += 1; continue
+        # One automatic answer per customer per BOT_REPEAT_HOURS. A second
+        # message soon after means the first answer did not settle it.
+        repeat = time.time() - bot_to.get(sender_email, 0) < BOT_REPEAT_HOURS * 3600
+
         orders = find_orders(sender_email, body)
         res = ask_brain(sender_name, sender_email, subject, body, orders)
         if res.get("brain_down"):
@@ -1014,7 +1086,7 @@ def main():
         delivered = False
         can_send = (res.get("action") == "draft" and conf >= MIN_CONF
                     and not sensitive and not promised and not claimed
-                    and not off_voice and ENABLE_SEND)
+                    and not off_voice and not repeat and ENABLE_SEND)
         if claimed:
             kind, phrase = claimed
             why = ("הבוט טען שביצע פעולה שאין לו בכלל הרשאה לבצע (הטוקן קריאה בלבד)"
@@ -1045,6 +1117,7 @@ def main():
                 M.store(num, "+FLAGS", "\\Seen")
                 sent += 1
                 delivered = True
+                bot_to[sender_email] = time.time()
                 log(f"SENT  {sender_email} | {subject[:40]} | conf={conf}")
                 tg(f"🤖 {STORE_NAME} — נשלחה תשובה אוטומטית ללקוח\n"
                    f"אל: {sender_name} <{sender_email}>\n"
@@ -1070,7 +1143,9 @@ def main():
                 pass
             escalated += 1
             why = (f"🚩 הבוט ניסה להבטיח \"{promised}\" — נחסם" if promised
-                   else "רגיש" if sensitive else res.get("reason", f"conf={conf}"))
+                   else "רגיש" if sensitive
+                   else "הלקוח כתב שוב אחרי תשובה אוטומטית - התשובה הקודמת לא סגרה את זה" if repeat
+                   else res.get("reason", f"conf={conf}"))
             log(f"ESCAL {sender_email} | {subject[:40]} | {why}")
             # Mail and ping only when a person actually wrote to us. Platform
             # mail and newsletters land in the log and nowhere else.

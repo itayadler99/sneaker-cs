@@ -224,9 +224,13 @@ def find_unanswered(user, pw):
     typ, data = M.search(None, f"(SINCE {since})")
     sent_ids = data[0].split() if data and data[0] else []
     answered = set()
+    # Anyone we already wrote to in the window, in any thread. On 2026-09-28
+    # Itay had answered customers himself and the bot still sent them the
+    # generic reply on a different thread.
+    contacted = set()
     for i in range(0, len(sent_ids), 100):
         spec = b",".join(sent_ids[i:i + 100]).decode()
-        typ, md = M.fetch(spec, "(X-GM-THRID)")
+        typ, md = M.fetch(spec, "(X-GM-THRID BODY.PEEK[HEADER.FIELDS (TO)])")
         if typ != "OK":
             continue
         for item in md:
@@ -234,6 +238,10 @@ def find_unanswered(user, pw):
             m = THRID.search(raw if isinstance(raw, bytes) else str(raw).encode())
             if m:
                 answered.add(m.group(1).decode())
+            if isinstance(item, tuple) and item[1]:
+                to = email.utils.parseaddr(email.message_from_bytes(item[1]).get("To", ""))[1]
+                if to:
+                    contacted.add(to.lower())
 
     M.select("INBOX", readonly=False)
 
@@ -259,7 +267,7 @@ def find_unanswered(user, pw):
             hdr = email.message_from_bytes(item[1])
             name, addr = email.utils.parseaddr(hdr.get("From", ""))
             addr = addr.lower()
-            if not addr or addr == me or IGNORE_SENDER.search(addr):
+            if not addr or addr == me or IGNORE_SENDER.search(addr) or addr in contacted:
                 continue
             # Bulk mail always carries an unsubscribe header. Real customers writing
             # from their own mailbox never do, so this is a cleaner filter than

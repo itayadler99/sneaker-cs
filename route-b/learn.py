@@ -251,11 +251,118 @@ def trim_examples(text):
         examples = examples[-MAX_EXAMPLES:]
     return head + "".join("### דוגמה" + b for b in examples)
 
+
+# ---- corrections: where Itay had to answer after the bot ----
+# Owner instruction 2026-09-28: "תלמד איך לשפר את עצמך". The general bank
+# above imitates Itay's tone; it cannot tell the bot what it got WRONG. A thread
+# where the bot answered and Itay then wrote himself is exactly that: the bot's
+# text next to what the owner actually wanted said. Those pairs become rules that
+# outrank every example.
+CORRECTIONS_PATH = os.path.join(ROOT, "kb", f"corrections-{STORE}.md")
+THRID_RE = re.compile(rb"X-GM-THRID\s+(\d+)")
+MAX_RULES = int(env("LEARN_MAX_RULES", "40"))
+
+
+def collect_corrections():
+    """(customer question, bot reply, Itay reply) for every thread in the window
+    where a human reply followed a bot reply."""
+    M = imap_connect()
+    M.select(f'"{SENT_BOX}"', readonly=True)
+    since = (datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+    typ, data = M.search(None, f"(SINCE {since})")
+    ids = data[0].split() if data and data[0] else []
+    threads = {}
+    for num in ids:
+        typ, md = M.fetch(num, "(X-GM-THRID INTERNALDATE BODY.PEEK[])")
+        if typ != "OK" or not md or not isinstance(md[0], tuple):
+            continue
+        m = THRID_RE.search(md[0][0])
+        if not m:
+            continue
+        try:
+            when = time.mktime(imaplib.Internaldate2tuple(md[0][0]))
+        except Exception:
+            when = 0
+        msg = email.message_from_bytes(md[0][1])
+        answer, question = split_reply(get_body(msg))
+        threads.setdefault(m.group(1), []).append(
+            (when, bool(msg.get(BOT_HEADER)), answer[:700], question[:700]))
+    M.logout()
+    out = []
+    for msgs in threads.values():
+        msgs.sort()
+        last_bot = None
+        for when, is_bot, answer, question in msgs:
+            if is_bot:
+                last_bot = (answer, question)
+            elif last_bot and len(answer) >= 10:
+                out.append({"question": question or last_bot[1], "bot": last_bot[0], "itay": answer})
+                last_bot = None
+    log(f"corrections found={len(out)}")
+    return out
+
+
+CORRECT_PROMPT = """אתה מאמן בוט שירות לקוחות של חנות הסניקרס {store}.
+לפניך מקרים אמיתיים: הבוט ענה ללקוח, ואחריו בעל החנות (איתי) ענה בעצמו באותה שיחה.
+הפער בין שתי התשובות = מה שהבוט עשה לא נכון.
+
+לכל מקרה שבו יש פער אמיתי, כתוב כלל אחד קצר שהבוט יכול לבצע, בפורמט:
+- כשהלקוח <מצב>: <מה לעשות / מה אסור>. (במקום: "<ציטוט קצר מהבוט>")
+
+כללים לכתיבת הכללים:
+- כלל = התנהגות שחוזרת, לא פרט של לקוח אחד. בלי שמות, מיילים או מספרי הזמנה.
+- אם איתי ענה בכעס, בעוקצנות או באיום משפטי (למשל "נשמח להיפגש בבית משפט") - הכלל הוא שהבוט לא עונה במצב הזה בכלל, לא שהבוט מחקה את הטון.
+- אם איתי מסר עובדה שהבוט לא יכול לדעת (אישור מסירה, בדיקה מול השילוח) - הכלל הוא לא לענות תשובה גנרית במצב כזה.
+- אם אין פער (הבוט ואיתי אמרו אותו דבר) - אל תכתוב כלל.
+- מקסימום 10 כללים. בלי הקדמה ובלי סיכום, רק שורות שמתחילות ב-"- ".
+
+מקרים:
+{cases}
+"""
+
+
+def distill_corrections(cases):
+    blob = "\n\n".join(
+        f"[{i+1}] לקוח: {c['question'][:500]}\nבוט: {c['bot'][:500]}\nאיתי: {c['itay'][:500]}"
+        for i, c in enumerate(cases[:25]))
+    prompt = CORRECT_PROMPT.format(store=STORE_NAME, cases=blob)
+    import cloud_worker as cw
+    try:
+        raw = cw.brain_via_gateway(prompt, max_tokens=2000)
+    except Exception as e:
+        log("corrections: gateway failed", repr(e))
+        raw = cw.brain_via_cli(prompt)
+    return [ln.strip() for ln in (raw or "").splitlines() if ln.strip().startswith("- ")]
+
+
+def update_corrections():
+    cases = collect_corrections()
+    if not cases:
+        return 0
+    rules = distill_corrections(cases)
+    old = []
+    if os.path.exists(CORRECTIONS_PATH):
+        old = [ln for ln in open(CORRECTIONS_PATH, encoding="utf-8").read().splitlines()
+               if ln.startswith("- ")]
+    merged = list(dict.fromkeys(rules + old))[:MAX_RULES]   # newest first, no dupes
+    with open(CORRECTIONS_PATH, "w", encoding="utf-8") as f:
+        f.write(f"# תיקונים של איתי - {STORE_NAME}\n\n"
+                "> נלמד אוטומטית ממקרים שבהם איתי ענה בעצמו אחרי הבוט. גובר על כל דוגמה.\n\n"
+                + "\n".join(merged) + "\n")
+    log(f"corrections: {len(rules)} new rules, {len(merged)} kept")
+    return len(rules)
+
+
 def main():
     if not ANTHROPIC_API_KEY:
         log("FATAL no ANTHROPIC_API_KEY"); print("DONE learned=0"); return
     if not APP_PW:
         log("no mailbox creds for this store"); print("DONE learned=0"); return
+    # Corrections first: they need no minimum sample, one bad answer is a lesson.
+    try:
+        update_corrections()
+    except Exception as e:
+        log("corrections failed", repr(e))
     pairs = collect_pairs()
     if len(pairs) < 3:
         log(f"only {len(pairs)} pairs — too few to learn"); print("DONE learned=0"); return

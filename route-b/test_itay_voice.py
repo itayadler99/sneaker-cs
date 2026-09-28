@@ -27,4 +27,7 @@ assert not W.apply_itay_voice({"action": "draft", "reply": ASK}, "", "איפה �
 t = run(ASK, [])[0]["reply"]
 assert not W.ASKS_FOR_ID.search(t) and not W.INVENTED.search(t)
 assert W.ASKS_FOR_ID.search(ASK) and W.INVENTED.search(INV)
+assert not run("x", [], body="למה החבילה הועברה לנקודת איסוף?", action="escalate")[1], "pickup point is not a where-question"
+assert not run("x", [], body="איפה הזוג השני? הגיע רק זוג אחד", action="escalate")[1], "split parcel"
+assert not run("x", fresh, body="איפה ההזמנה?", action="escalate")[1], "found order + escalate stays escalate"
 print("ok")
